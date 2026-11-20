@@ -229,8 +229,10 @@ on_failure() {
   for f in "$RULES_FILE:$AUDIT_KEY" "$LEGACY_RULES:$LEGACY_KEY"; do
     k=${f##*:}; f=${f%:*}
     [[ -f $f ]] && rules_is_ours "$f" "$k" || continue
-    auditctl -l 2>/dev/null | grep -q -- "-k $k\$" && continue
-    auditctl -c -R "$f" >/dev/null 2>&1 && echo "install failed: reloaded the previous audit rules from $f" >&2
+    # always reload, even if some rules are loaded: a partial load (one rule
+    # refused) would leave the trap half-armed
+    auditctl -D -k "$k" >/dev/null 2>&1
+    auditctl -c -R "$f" >/dev/null 2>&1 && echo "install failed: reloaded the audit rules from $f" >&2
   done
   if [[ $WAS_ACTIVE == yes ]]; then
     systemctl daemon-reload; systemctl start "$SERVICE_NAME" && echo "install failed: restarted $SERVICE_NAME" >&2
@@ -391,8 +393,26 @@ load_rules() {
   rules_text >"$RULES_FILE"
   chmod 640 "$RULES_FILE"
   cat "$RULES_FILE"
-  augenrules --load >/dev/null 2>&1 || auditctl -c -R "$RULES_FILE" >/dev/null || true
+  augenrules --load >/dev/null 2>&1 || true
+  # The kernel can refuse a rule added right after the old ones were deleted
+  # (seen on Arch), and augenrules stops at the first refusal: reload ours alone
+  local try
+  for try in 1 2 3; do
+    rules_complete "$(auditctl -l 2>/dev/null)" && break
+    auditctl -D -k "$AUDIT_KEY" >/dev/null 2>&1
+    sleep "$try"
+    auditctl -c -R "$RULES_FILE" >/dev/null || true
+  done
   auditctl -l | grep -- "-k $AUDIT_KEY" || die "audit rule not loaded"
+}
+
+rules_complete() { # auditctl -l output: does every bait have its write watch and open rule?
+  local b r
+  for b in "${BAITS[@]}"; do
+    r=$(rules_for "$1" "$b")
+    grep -qE -- '(-p |perm=)[a-z]*w' <<<"$r" || return 1
+    grep -qE -- '-S [^ ]*open' <<<"$r" || return 1
+  done
 }
 
 rules_for() { # loaded-rules path: loaded rules with our key on exactly this path

@@ -401,21 +401,42 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   [ -e "$T/home/password.txt" ]
 }
 
-@test "on_failure: reloads our rules file if the key isn't loaded, restarts the service" {
+@test "on_failure: reloads our rules file (even half-loaded), restarts the service" {
   echo "-w /x -p wa -k $AUDIT_KEY" >"$RULES_FILE"
+  fake auditctl "[[ \$1 == -l ]] && echo '-w /x -p wa -k $AUDIT_KEY'; true"
   WAS_ACTIVE=yes
   ( ( exit 3 ) || on_failure 2>/dev/null )   # subshell: on_failure turns off -e
+  grep -qx "auditctl -D -k $AUDIT_KEY" "$T/calls"
   grep -qx "auditctl -c -R $RULES_FILE" "$T/calls"
   grep -qx "systemctl start $SERVICE_NAME" "$T/calls"
 }
 
-@test "on_failure: leaves loaded rules alone, never loads someone else's file" {
-  echo "-w /x -p wa -k $AUDIT_KEY" >"$RULES_FILE"
+@test "on_failure: never loads someone else's file, no restart if it wasn't running" {
   echo "-w /y -p wa -k someone-else" >"$LEGACY_RULES"
-  fake auditctl "[[ \$1 == -l ]] && echo '-w /x -p wa -k $AUDIT_KEY'; true"
   ( ( exit 3 ) || on_failure 2>/dev/null )   # subshell: on_failure turns off -e
   not grep -q -- "-R" "$T/calls"
   not grep -q systemctl "$T/calls"
+}
+
+@test "load_rules: a partial load is retried with our rules alone" {
+  add_example password.txt
+  probe_syscalls
+  fake augenrules "exit 1"
+  # first listing: the open rule is missing; after the reload, everything is there
+  fake auditctl "if [[ \$1 == -l ]]; then if grep -q -- '-R' '$T/calls'; then cat '$RULES_FILE'; else grep -v -- -S '$RULES_FILE'; fi; fi; true"
+  sleep() { :; }
+  load_rules >/dev/null
+  grep -qx "auditctl -D -k $AUDIT_KEY" "$T/calls"
+  [ "$(grep -c -- "-R $RULES_FILE" "$T/calls")" -eq 1 ]
+}
+
+@test "load_rules: a complete load isn't touched" {
+  add_example password.txt
+  probe_syscalls
+  fake auditctl "[[ \$1 == -l ]] && cat '$RULES_FILE'; true"
+  load_rules >/dev/null
+  not grep -q -- "-R" "$T/calls"
+  not grep -q -- "-D" "$T/calls"
 }
 
 # ------------------------------------------------------------- config
