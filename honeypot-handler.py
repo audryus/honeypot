@@ -548,8 +548,9 @@ def parse_ausearch(out):
 def ausearch(serial):
     time.sleep(AUSEARCH_DELAY)
     # -ts recent: serial numbers restart at every boot, so without a time bound
-    # an older event with the same serial would be picked up
-    return parse_ausearch(run(["ausearch", "-a", serial, "-ts", "recent", "-i"], timeout=6)[1])
+    # an older event with the same serial would be picked up. --input-logs:
+    # without it ausearch reads stdin instead of the logs when stdin is a pipe
+    return parse_ausearch(run(["ausearch", "--input-logs", "-a", serial, "-ts", "recent", "-i"], timeout=6)[1])
 
 
 # ---------------------------------------------------------------- which bait

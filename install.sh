@@ -334,7 +334,7 @@ PY
 ) || die "end-to-end test: could not open the bait files"
 missing=("${BAITS[@]}")
 for _ in $(seq 20); do   # auditd writes asynchronously: give it up to ~10s
-  seen=$(ausearch -k "$AUDIT_KEY" -p "$E2E_PID" -ts recent -i 2>/dev/null | grep '^type=PATH' || true)
+  seen=$(ausearch --input-logs -k "$AUDIT_KEY" -p "$E2E_PID" -ts recent -i 2>/dev/null | grep '^type=PATH' || true)
   missing=()
   for b in "${BAITS[@]}"; do
     grep -qF -e "name=$b " -e "name=\"$b\" " <<<"$seen" || missing+=("$b")

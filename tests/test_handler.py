@@ -515,7 +515,7 @@ class Enrichment(Base):
     def test_ausearch(self):
         self.run.on(["ausearch"], 0, self.AUS)
         self.assertEqual(h.ausearch("4711")["cwd"], "/home/a")
-        self.assertEqual(self.run.calls[-1][0], ["ausearch", "-a", "4711", "-ts", "recent", "-i"])
+        self.assertEqual(self.run.calls[-1][0], ["ausearch", "--input-logs", "-a", "4711", "-ts", "recent", "-i"])
 
 
 # ---------------------------------------------------------------- which bait
