@@ -1,0 +1,28 @@
+services:
+  api:
+    image: ghcr.io/@@USER@@/billing-api:2.14.3
+    env_file: .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+      - cache
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD: @@PASS:24:dbpass@@
+      POSTGRES_DB: billing
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  cache:
+    image: redis:7-alpine
+    command: redis-server --requirepass @@ALNUM:32:redispass@@
+    restart: unless-stopped
+
+volumes:
+  pgdata:

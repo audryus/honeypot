@@ -1,0 +1,202 @@
+# =============================================================================
+#  Bait-file tripwire configuration
+# =============================================================================
+#
+#  HOW TO USE THIS FILE
+#    1. Copy it next to install.sh as "honeypot.conf" (that name is git-ignored,
+#       so your tokens and chosen names never end up in the repository):
+#           cp honeypot.conf.example honeypot.conf
+#    2. Edit it: at least pick your own STEALTH names and one notification channel.
+#    3. Run:  sudo ./install.sh
+#       install.sh copies this file to CONF_PATH (see below), root-only (mode 600).
+#
+#  FORMAT
+#    KEY=value, one per line. No spaces around "=". Quotes are optional
+#    (KEY="a b" and KEY=a b are the same). Lines starting with # are ignored.
+#
+#  WHEN CHANGES TAKE EFFECT
+#    - STEALTH section: only when install.sh runs (see "renaming" below).
+#    - Everything else: edit the INSTALLED copy at CONF_PATH. It is re-read on
+#      every event, so there is nothing to restart.
+#
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  STEALTH: names on disk
+# -----------------------------------------------------------------------------
+#  An intruder who spots a trap-looking service, process or file simply avoids
+#  the bait, so nothing installed should give it away. These defaults are PUBLIC (they
+#  are in this repository), so anyone who knows the project could look for them.
+#  Change them to something of your own that fits your system.
+#
+#  Who can see each name:
+#    [everyone]  any logged-in user (systemctl, ps, ls)   -> change these first
+#    [root]      only root (they're already game over, but why help them)
+#
+#  Tips for a convincing name:
+#    - Mimic something already on the box (polkit, udisks, fwupd, colord,
+#      packagekit, NetworkManager-dispatcher, a cloud/vendor agent...).
+#    - Keep names consistent with each other (same "vendor" everywhere).
+#    - Never reuse a name that already exists; install.sh refuses to overwrite
+#      a real unit or file.
+#
+#  RENAMING AN EXISTING INSTALL
+#    install.sh / uninstall.sh only know the names written here. To switch names:
+#      sudo ./uninstall.sh      # while this file still has the OLD names
+#      (edit the names)
+#      sudo ./install.sh        # installs under the NEW names
+#    (Old installs using the original "honeypot" names are migrated automatically.)
+
+# [everyone] systemd unit name, without ".service". Shown by
+#   `systemctl list-units`, `systemctl status`, and in the journal.
+#   Letters, digits, . _ - only.
+#   Examples: polkit-agent-helper, udisks2-monitor, fwupd-refresh-agent
+SERVICE_NAME=polkit-agent-helper
+
+# [everyone] Description line of that unit (`systemctl status`, boot messages).
+#   Letters, digits, spaces and . _ ( ) / - only.
+#   Examples: Authorization Agent Helper, Disk Manager Monitor
+SERVICE_DESCRIPTION=Authorization Agent Helper
+
+# [everyone] Where the handler program is installed. This full path is what
+#   `ps aux` / `top` show (as "python3 <path>"). Installed root-only (mode 700),
+#   so others can see it exists but cannot read it.
+#   Examples: /usr/lib/polkit-1/polkit-agent-helper
+#             /usr/libexec/udisks2/udisks-monitor
+#             /usr/local/lib/fwupd/fwupd-agent
+HANDLER_PATH=/usr/lib/polkit-1/polkit-agent-helper
+
+# [everyone*] Where this config is installed (mode 600, root only).
+#   *Others can see the file exists if its folder is listable.
+#   It is baked into the installed handler, so no flag shows up in `ps`.
+#   Examples: /etc/polkit-1/agent-helper.conf, /etc/udisks2/monitor.conf
+CONF_PATH=/etc/polkit-1/agent-helper.conf
+
+# [everyone*] Folder for the detailed incident reports (one .log per event,
+#   root only). The journal only gets a bland one-liner pointing here.
+#   Examples: /var/lib/polkit-1/agent-cache, /var/cache/udisks2/monitor
+REPORT_DIR=/var/lib/polkit-1/agent-cache
+
+# [root] Audit rules file name inside /etc/audit/rules.d/ (".rules" is added).
+#   The number sets load order; any 10-90 is fine.
+#   Examples: 50-polkit, 40-udisks, 60-local
+RULES_NAME=50-polkit
+
+# [root] Audit key that tags bait events (`auditctl -l`, `ausearch -k`).
+#   Max 31 chars: letters, digits, . _ -
+#   Examples: pk-auth, udisks-mon, perm_mod
+AUDIT_KEY=pk-auth
+
+# [root] nftables table holding the ban sets (`nft list ruleset`).
+#   Letters, digits and _ only, starting with a letter.
+#   Examples: raw_filter, filter_early, netguard
+NFT_TABLE=raw_filter
+
+
+# -----------------------------------------------------------------------------
+#  BAIT
+# -----------------------------------------------------------------------------
+# Absolute paths of the watched bait files, space separated. Written by
+# install.sh from its -e / -f options, so leave it alone here. Pick decoys at
+# install time instead (see examples/README.md), e.g.:
+#     sudo ./install.sh -e .aws -e projects
+BAIT_FILE=
+
+
+# -----------------------------------------------------------------------------
+#  NOTIFICATION LOOK
+# -----------------------------------------------------------------------------
+# Machine name shown in alerts ("... triggered on <HOST_LABEL>").
+# Empty = the machine's hostname.   Example: HOST_LABEL=homelab-nas
+HOST_LABEL=
+
+
+# -----------------------------------------------------------------------------
+#  CONTAINMENT (what happens to the intruder)
+# -----------------------------------------------------------------------------
+# yes = end the intruder's login session (loginctl terminate-session).
+#   If there is no login session (web shell, cron, container), only the process
+#   that touched the bait and its parent shell are killed, never anything higher
+#   up (that could be a real service).
+#   no  = monitor only: alert, but let them continue (good for testing).
+KILL_SESSION=yes
+
+# yes = drop ALL traffic from the source IP (SSH, web UIs, databases...) and cut
+#   its open connections. Only works when the intruder came over the network
+#   (SSH); local or container access has no source IP.
+BAN_IP=yes
+
+# How long a ban lasts. nft time units: s, m, h, d (they can be combined).
+#   Examples: 30m, 1h, 12h, 1d, 7d, 1d12h
+#   Bans are kept in memory: a reboot or `nft flush ruleset` clears them.
+#   List bans:  sudo <HANDLER_PATH> --bans
+#   Unban:      sudo <HANDLER_PATH> --unban 203.0.113.7
+BAN_TIMEOUT=1h
+
+# IPs that are NEVER banned (their session is still killed). Space separated,
+#   single addresses only (no ranges). Loopback is never banned anyway.
+#   Put at least one machine here that you can always recover from, otherwise
+#   opening the bait by mistake from your own laptop locks it out.
+#   Example: BAN_SAFE_IPS=192.168.1.10 192.168.1.11 fd00::10
+BAN_SAFE_IPS=
+
+
+# -----------------------------------------------------------------------------
+#  NOISE CONTROL (avoiding false alarms)
+# -----------------------------------------------------------------------------
+# Programs allowed to open the bait silently, given by FULL path and space
+#   separated. Typical: backup or indexing tools that read your whole home dir.
+#   Find the path in a report's "Process:" line [in brackets].
+#   Example: IGNORE_EXES=/usr/bin/restic /usr/bin/borg /usr/lib/baloo_file
+IGNORE_EXES=
+
+# Login uids (auid) to ignore completely, space separated. auid is the user who
+#   originally logged in, even after sudo/su. Normally leave EMPTY: ignoring
+#   your own uid also ignores anyone who steals your account.
+#   Example: IGNORE_AUIDS=1001
+IGNORE_AUIDS=
+
+# One alert per session (or per process, when there's no session) within this
+#   many seconds. `cat`, an editor, a grep... can open the file several times.
+DEBOUNCE_SECONDS=30
+
+
+# -----------------------------------------------------------------------------
+#  ENRICHMENT (extra details in the report)
+# -----------------------------------------------------------------------------
+# yes = look up city / country / ISP of PUBLIC source IPs via ipinfo.io
+#   (LAN addresses are never sent). no = never contact ipinfo.io.
+IP_LOOKUP=yes
+
+
+# -----------------------------------------------------------------------------
+#  NOTIFICATIONS (configure one or more; all configured ones are used)
+# -----------------------------------------------------------------------------
+# Check them after editing:  sudo <HANDLER_PATH> --test
+
+# ntfy (simplest, free): install the ntfy app on your phone and subscribe to a
+#   topic. Anyone who knows the topic name can read AND send to it, so make it
+#   long and random, e.g. the output of:  openssl rand -hex 16
+#   Example: NTFY_URL=https://ntfy.sh/3f9c1a7e5b2d48c0a6e1f4b9d7c2e8a1
+#   Self-hosted: NTFY_URL=https://ntfy.example.com/alerts  plus NTFY_TOKEN
+NTFY_URL=
+# Access token, only for protected topics / self-hosted servers.
+#   Example: NTFY_TOKEN=tk_abc123...
+NTFY_TOKEN=
+
+# Telegram: talk to @BotFather -> /newbot -> copy the token. Send any message to
+#   your new bot, then get your chat id from @userinfobot.
+#   Example: TELEGRAM_BOT_TOKEN=123456789:AAH-xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#            TELEGRAM_CHAT_ID=987654321
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# Discord: Channel settings -> Integrations -> Webhooks -> New -> Copy URL.
+#   Example: DISCORD_WEBHOOK=https://discord.com/api/webhooks/123/abcDEF...
+DISCORD_WEBHOOK=
+
+# Any endpoint (Home Assistant, n8n, Gotify proxy, your own script) that accepts
+#   a JSON POST:  {"title": "...", "message": "...", "event": {full details}}
+#   Example: WEBHOOK_URL=http://homeassistant.lan:8123/api/webhook/tripwire-x7k2
+WEBHOOK_URL=

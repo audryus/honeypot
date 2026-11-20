@@ -1,0 +1,33 @@
+{
+    "addr_history": {
+        "bc1q@@BECH32:38:a1@@": [],
+        "bc1q@@BECH32:38:a2@@": [],
+        "bc1q@@BECH32:38:a3@@": [],
+        "bc1q@@BECH32:38:c1@@": []
+    },
+    "addresses": {
+        "change": [
+            "bc1q@@BECH32:38:c1@@"
+        ],
+        "receiving": [
+            "bc1q@@BECH32:38:a1@@",
+            "bc1q@@BECH32:38:a2@@",
+            "bc1q@@BECH32:38:a3@@"
+        ]
+    },
+    "keystore": {
+        "derivation": "m/0h",
+        "pw_hash_version": 1,
+        "root_fingerprint": "@@HEX:8@@",
+        "seed": "@@WORDS:12@@",
+        "seed_type": "segwit",
+        "type": "bip32",
+        "xprv": "zprvAW@@B58:105@@",
+        "xpub": "zpub6j@@B58:105@@"
+    },
+    "seed_version": 59,
+    "spent_outpoints": {},
+    "transactions": {},
+    "use_encryption": false,
+    "wallet_type": "standard"
+}
