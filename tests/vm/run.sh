@@ -90,8 +90,25 @@ for _ in $(seq 120); do   # up to 10 minutes
   sleep 5
 done
 [[ $up == yes ]] || { echo "::error::$DISTRO VM never answered on ssh"; console; exit 1; }
-vm_ssh 'sudo cloud-init status --wait >/dev/null 2>&1; cat /etc/os-release | grep PRETTY_NAME; uname -r'
+vm_ssh 'sudo cloud-init status --wait >/dev/null 2>&1; true'
 endgroup
+
+# A rolling release's image is behind its repos: the test's package installs
+# would upgrade the kernel under the running one, whose modules (nftables,
+# dummy) then can't load. Upgrade first and boot the new kernel.
+if [[ $DISTRO == arch ]]; then
+  group "upgrade and reboot"
+  vm_ssh 'sudo pacman -Syu --noconfirm >/dev/null && sudo systemctl reboot' || true
+  sleep 15
+  up=no
+  for _ in $(seq 60); do
+    if vm_ssh true 2>/dev/null; then up=yes; break; fi
+    sleep 5
+  done
+  [[ $up == yes ]] || { echo "::error::$DISTRO VM didn't come back after the upgrade"; console; exit 1; }
+  endgroup
+fi
+vm_ssh 'grep PRETTY_NAME /etc/os-release; uname -r' 
 
 # ------------------------------------------------------------- test
 tar -C "$ROOT" --exclude=.git -czf - . | vm_ssh 'rm -rf ~/hp && mkdir ~/hp && tar -C ~/hp -xzf -'

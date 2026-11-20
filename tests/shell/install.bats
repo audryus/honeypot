@@ -304,6 +304,26 @@ pid 42'
   verify_rules "$LOADED_NEW"$'\n-a never,task -F exe=/usr/bin/x' "$ENABLED"
 }
 
+@test "preflight_audit: refuses a rules file or loaded rule that silences auditing" {
+  AUDIT_RULES_DIR=$T/rules.d; mkdir -p "$AUDIT_RULES_DIR"
+  printf -- '-D\n-a exit,never -F arch=b64 -S adjtimex\n' >"$AUDIT_RULES_DIR/audit.rules"
+  preflight_audit "$LOADED_NEW"
+  echo '-a task,never' >>"$AUDIT_RULES_DIR/audit.rules"
+  run preflight_audit "$LOADED_NEW"
+  [ "$status" -eq 1 ]
+  [[ $output == *"$AUDIT_RULES_DIR/audit.rules has a '-a task,never' rule"* ]]
+  rm "$AUDIT_RULES_DIR/audit.rules"
+  run preflight_audit "$LOADED_NEW"$'\n-a never,task'
+  [ "$status" -eq 1 ]
+  [[ $output == *"is loaded"* ]]
+}
+
+@test "preflight_audit: a commented-out or filtered rule is fine" {
+  AUDIT_RULES_DIR=$T/rules.d; mkdir -p "$AUDIT_RULES_DIR"
+  printf -- '# -a task,never\n-a never,task -F exe=/usr/bin/x\n' >"$AUDIT_RULES_DIR/audit.rules"
+  preflight_audit ""
+}
+
 @test "unseen_baits: both ausearch name formats" {
   BAITS=(/h/a /h/b /h/c)
   run unseen_baits 'type=PATH msg=x item=0 name=/h/a inode=1

@@ -23,6 +23,9 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # Where distributions ship their own units: a SERVICE_NAME found there is real.
 SYSTEM_UNIT_DIRS=(/usr/lib/systemd/system /lib/systemd/system /run/systemd/system)
+AUDIT_RULES_DIR=/etc/audit/rules.d
+# An unfiltered "never,task" rule turns off syscall auditing for every process
+NEVER_TASK_RE='^[[:space:]]*-a[[:space:]]+(never,task|task,never)[[:space:]]*$'
 
 TARGET_USER=${SUDO_USER:-}
 EXAMPLES=()
@@ -187,6 +190,19 @@ probe_syscalls() {
     done
   done
   [[ -n ${SC[b64]}${SC[b32]} ]] || die "ausyscall can't resolve the open syscalls: reads of the bait would go unnoticed"
+}
+
+# Some distributions ship a rule that turns off syscall auditing for every
+# process (Fedora: "-a task,never" in /etc/audit/rules.d/audit.rules), so the
+# bait could never fire. Checked before anything is created; verify_rules
+# checks again once our rules are loaded.
+preflight_audit() { # auditctl -l output
+  local f
+  f=$(grep -lxE -- "$NEVER_TASK_RE" "$AUDIT_RULES_DIR"/*.rules 2>/dev/null | head -n1 || true)
+  [[ -z $f ]] || die "$f has a '-a task,never' rule: it turns off syscall auditing for every process, so the bait could never fire. Comment that line out, then re-run (the installer reloads the rules)"
+  if grep -qxE -- "$NEVER_TASK_RE" <<<"$1"; then
+    die "a '-a never,task' audit rule is loaded (auditctl -l): it turns off syscall auditing for every process, so the bait could never fire. Find where it comes from (grep -r never /etc/audit), remove it, then re-run"
+  fi
 }
 
 # ------------------------------------------------------------- failure cleanup
@@ -397,7 +413,7 @@ verify_rules() { # auditctl -l output, auditctl -s output
   done
   [[ $(awk '$1 == "enabled" {print $2}' <<<"$2") != 0 ]] \
     || die "kernel auditing is disabled (auditctl -s: enabled 0, or audit=0 on the kernel command line): no event would ever fire"
-  if grep -qxE -- '-a (never,task|task,never)' <<<"$1"; then   # unfiltered = every task
+  if grep -qxE -- "$NEVER_TASK_RE" <<<"$1"; then
     die "a 'never,task' audit rule is loaded (often /etc/audit/rules.d/audit.rules): it silences all syscall auditing, so the bait could never fire. Remove it, then re-run"
   fi
   echo "verified: every bait has its open and write rules loaded"
@@ -491,6 +507,7 @@ main() {
   refuse_collisions
   install_deps
   probe_syscalls
+  preflight_audit "$(auditctl -l 2>/dev/null)"
   trap on_failure EXIT
   disarm
   create_baits

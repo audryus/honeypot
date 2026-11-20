@@ -78,11 +78,16 @@ wait_alert() { # title-prefix expected-count timeout
 }
 last_alert() { grep "\"$1" "$ALERTS" | tail -n1; }
 install_args=(-u "$U" -e password.txt -e vpn -f "$UHOME/notes.txt")
-run_install() { (cd "$REPO" && ./install.sh "$@") >"$W/install.log" 2>&1; }
+run_install() { # every run's output is kept in install-all.log for the diagnostics
+  local r
+  (cd "$REPO" && ./install.sh "$@") >"$W/install.log" 2>&1; r=$?
+  { echo "=== install.sh $* (exit $r)"; cat "$W/install.log"; } >>"$W/install-all.log"
+  return $r
+}
 
 diagnostics() {
   group "diagnostics"
-  echo "--- last install output"; tail -n 60 "$W/install.log" 2>/dev/null
+  echo "--- install outputs"; tail -n 250 "$W/install-all.log" 2>/dev/null
   echo "--- alerts"; alerts
   echo "--- service"; systemctl status "$SERVICE" --no-pager 2>&1 | head -20
   echo "--- journal"; journalctl -u "$SERVICE" --no-pager -n 50 2>&1
@@ -165,6 +170,34 @@ rm -rf "$REPO/.git"
   echo "HEARTBEAT_DAYS=0"
 } >"$REPO/honeypot.conf"
 sleep 1
+endgroup
+
+# ------------------------------------------------------------- silenced auditing
+# Fedora ships "-a task,never" (no syscall auditing at all): the installer must
+# refuse before creating anything. Elsewhere, plant such a rule to test that.
+NEVER_RE='^[[:space:]]*-a[[:space:]]+(never,task|task,never)[[:space:]]*$'
+group "refuses a system where syscall auditing is off (-a task,never)"
+if grep -qxE "$NEVER_RE" /etc/audit/rules.d/*.rules 2>/dev/null; then
+  echo "this distribution ships it: $(grep -lxE "$NEVER_RE" /etc/audit/rules.d/*.rules)"
+  planted=no
+else
+  echo "-a task,never" >/etc/audit/rules.d/10-hp-never.rules
+  augenrules --load >/dev/null 2>&1
+  planted=yes
+fi
+check_not "install.sh refuses" run_install "${install_args[@]}"
+check "it says why" grep -q "task,never" "$W/install.log"
+check_not "no bait was created" test -e "$UHOME/password.txt"
+check_not "no config was installed" test -e "$CONF"
+check_not "no service was installed" test -e "/etc/systemd/system/$SERVICE.service"
+# Then do what the message says (on Fedora: what its user would do)
+if [[ $planted == yes ]]; then
+  rm -f /etc/audit/rules.d/10-hp-never.rules
+else
+  sed -i -E "s/$NEVER_RE/# &/" /etc/audit/rules.d/*.rules
+fi
+augenrules --load >/dev/null 2>&1
+check_not "rule gone" bash -c "auditctl -l | grep -qxE '$NEVER_RE'"
 endgroup
 
 # ------------------------------------------------------------- install
