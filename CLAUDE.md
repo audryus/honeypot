@@ -38,13 +38,14 @@ The rule deliberately avoids `-w <bait> -p r`: auditd's read class includes getx
 
 ## Development
 
-Tests cover the two Python scripts (stdlib `unittest`, no install needed; the shell scripts have none). The handler tests fake `run()`, `os.kill`, `http` and `urlopen` in `setUp` (`Base` in `tests/test_handler.py`), so they never run a command, kill anything, touch nftables or the network; keep new tests on `Base`. Keep functions small and side effects behind `run()`/`os.kill`/`http` so they stay testable. `tests/` is never installed (install.sh copies only the two scripts).
+Tests come in stages, and CI (`.github/workflows/tests.yml`) runs the next stage only if the previous one passed: (1) Python `unittest` (3.8 to 3.13), `bash -n` + shellcheck, and bats unit tests of the shell functions (`tests/shell/`); (2) `tests/integration/run.sh`, the real install/trigger/ban/health/uninstall as root on throwaway Ubuntu runners (it refuses to run elsewhere unless `HP_FORCE=1`: it installs the tripwire and kills sessions). install.sh and uninstall.sh are one function per step plus `main`, guarded so bats can source them without running anything; keep new logic in small functions that take their inputs as arguments or globals and leave system tools to fakes on PATH. In bats, `! cmd` and a non-final `[ a ] && [ b ]` never fail a test (set -e ignores them): use the `not` helper and one check per line. The handler tests fake `run()`, `os.kill`, `http` and `urlopen` in `setUp` (`Base` in `tests/test_handler.py`), so they never run a command, kill anything, touch nftables or the network; keep new tests on `Base`. Keep functions small and side effects behind `run()`/`os.kill`/`http` so they stay testable. `tests/` is never installed (install.sh copies only the two scripts).
 
 ```bash
 python3 -m unittest discover -s tests && rm -rf tests/__pycache__   # all tests (~2 s)
 python3 -m py_compile honeypot-handler.py render-bait.py && rm -rf __pycache__
 python3 -I render-bait.py alice nas01 examples/.git-credentials /tmp/out   # render one template (install.sh uses `uname -n`, not `hostname -s`)
-bash -n install.sh uninstall.sh common.sh        # shellcheck *.sh if installed
+bash -n install.sh uninstall.sh common.sh        # shellcheck -x -S warning *.sh if installed
+bats tests/shell                                 # shell unit tests (bats-core), no root
 HONEYPOT_CONF=./honeypot.conf python3 honeypot-handler.py --test   # notification-only, safe
 ```
 

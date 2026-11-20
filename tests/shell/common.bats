@@ -21,6 +21,10 @@ teardown() {
   rm -rf "$T"
 }
 
+# `! cmd` and `[ a ] && [ b ]` never fail a bats test (set -e ignores both),
+# so negative checks use `not cmd` and checks are one per line.
+not() { if "$@"; then echo "unexpectedly succeeded: $*"; return 1; fi; }
+
 # ------------------------------------------------------------- conf_get
 @test "conf_get: plain value" {
   printf 'A=1\nB=two words\n' >"$T/c"
@@ -162,43 +166,43 @@ bad_name() { # KEY VALUE expected-message
 @test "no_symlink: refuses a path through a symlink" {
   mkdir -p "$T/real"
   ln -s "$T/real" "$T/link"
-  ! no_symlink "$T/link/file"
-  ! no_symlink "$T/link"
+  not no_symlink "$T/link/file"
+  not no_symlink "$T/link"
 }
 
 @test "no_symlink: refuses a symlinked file and relative or unnormalised paths" {
   touch "$T/target"
   ln -s "$T/target" "$T/file"
-  ! no_symlink "$T/file"
-  ! no_symlink relative/file
-  ! no_symlink "$T/a/../b"
+  not no_symlink "$T/file"
+  not no_symlink relative/file
+  not no_symlink "$T/a/../b"
 }
 
 # ------------------------------------------------------------- is it ours?
 @test "unit_is_ours: exact ExecStart line only" {
   printf '[Service]\nExecStart=/usr/lib/x/helper\n' >"$T/u"
   unit_is_ours "$T/u" /usr/lib/x/helper
-  ! unit_is_ours "$T/u" /usr/lib/x/help
-  ! unit_is_ours "$T/missing" /usr/lib/x/helper
+  not unit_is_ours "$T/u" /usr/lib/x/help
+  not unit_is_ours "$T/missing" /usr/lib/x/helper
 }
 
 @test "handler_is_ours: recognises the real handler" {
   handler_is_ours "$ROOT/honeypot-handler.py"
-  ! handler_is_ours "$ROOT/render-bait.py"
+  not handler_is_ours "$ROOT/render-bait.py"
 }
 
 @test "rules_is_ours: key must end the line" {
   echo '-w /x -p wa -k pk-auth' >"$T/r"
   rules_is_ours "$T/r" pk-auth
   echo '-w /x -p wa -k pk-auth2' >"$T/r"
-  ! rules_is_ours "$T/r" pk-auth
+  not rules_is_ours "$T/r" pk-auth
 }
 
 @test "conf_is_ours: needs an AUDIT_KEY line" {
   echo 'AUDIT_KEY=x' >"$T/c"
   conf_is_ours "$T/c"
   echo '# AUDIT_KEY=x' >"$T/c"
-  ! conf_is_ours "$T/c"
+  not conf_is_ours "$T/c"
 }
 
 # ------------------------------------------------------------- remove_reports
@@ -228,7 +232,9 @@ bad_name() { # KEY VALUE expected-message
   cp "$ROOT/honeypot-handler.py" "$T/h"
   echo '-w /x -p wa -k k1' >"$T/r"
   remove_install "$T/u.service" "$T/h" "$T/r" k1 tbl
-  [ ! -e "$T/u.service" ] && [ ! -e "$T/h" ] && [ ! -e "$T/r" ]
+  [ ! -e "$T/u.service" ]
+  [ ! -e "$T/h" ]
+  [ ! -e "$T/r" ]
   grep -qx 'systemctl disable --now u.service' "$T/calls"
   grep -qx 'auditctl -D -k k1' "$T/calls"
   grep -qx 'nft delete table inet tbl' "$T/calls"
@@ -239,8 +245,10 @@ bad_name() { # KEY VALUE expected-message
   echo 'real program' >"$T/h"
   echo '-w /x -p wa -k someone-else' >"$T/r"
   remove_install "$T/u.service" "$T/h" "$T/r" k1 tbl
-  [ -e "$T/u.service" ] && [ -e "$T/h" ] && [ -e "$T/r" ]
-  ! grep -q systemctl "$T/calls"
+  [ -e "$T/u.service" ]
+  [ -e "$T/h" ]
+  [ -e "$T/r" ]
+  not grep -q systemctl "$T/calls"
 }
 
 @test "remove_install: nothing installed is fine" {
