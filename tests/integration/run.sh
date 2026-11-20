@@ -48,6 +48,17 @@ check_not() {
 }
 die() { fail "$*"; exit 1; }
 
+# NEVER read a bait from this script while the service runs: this process has
+# no login session, so the handler kills the reader AND its parent shell, which
+# is this script (its process name is "bash"). Read baits through offline().
+offline() { # command...: run it with the service stopped
+  local r
+  systemctl stop "$SERVICE"
+  "$@"; r=$?
+  systemctl start "$SERVICE"
+  return $r
+}
+
 ssh_as() { # [ip] -- command
   local ip=127.0.0.1
   [[ $1 != -- ]] && { ip=$1; shift; }
@@ -153,9 +164,9 @@ check "password.txt is a bait" grep -qw -- "$UHOME/password.txt" <<<"$BAITS"
 check "vpn decoy is a bait" grep -qw -- "$UHOME/vpn/office-wg0.conf" <<<"$BAITS"
 check "notes.txt (-f) is a bait" grep -qw -- "$UHOME/notes.txt" <<<"$BAITS"
 check_not "notes.txt is not marked created" grep -qw -- "$UHOME/notes.txt" <<<"$CREATED"
-check "notes.txt content untouched" grep -qx "my real notes" "$UHOME/notes.txt"
+check "notes.txt content untouched" offline grep -qx "my real notes" "$UHOME/notes.txt"
 check "baits belong to $U" test "$(stat -c %U "$UHOME/password.txt" "$UHOME/vpn/office-wg0.conf" | sort -u)" = "$U"
-check "decoy has no leftover @@tokens@@" bash -c "! grep -q '@@' '$UHOME/vpn/office-wg0.conf' '$UHOME/password.txt'"
+check "decoy has no leftover @@tokens@@" offline bash -c "! grep -q '@@' '$UHOME/vpn/office-wg0.conf' '$UHOME/password.txt'"
 old() { (( $(date +%s) - $(stat -c %Y "$1") > 90 * 86400 )); }
 check "created bait is backdated" old "$UHOME/password.txt"
 check "created folder is backdated" old "$UHOME/vpn"
@@ -234,10 +245,10 @@ endgroup
 
 # ------------------------------------------------------------- re-install
 group "re-install (idempotent)"
-sum=$(sha256sum "$UHOME/password.txt" "$UHOME/vpn/office-wg0.conf")
+sum=$(offline sha256sum "$UHOME/password.txt" "$UHOME/vpn/office-wg0.conf")
 mt=$(stat -c %Y "$UHOME/password.txt")
 check "second install.sh succeeds" run_install "${install_args[@]}"
-check "bait content kept" test "$(sha256sum "$UHOME/password.txt" "$UHOME/vpn/office-wg0.conf")" = "$sum"
+check "bait content kept" test "$(offline sha256sum "$UHOME/password.txt" "$UHOME/vpn/office-wg0.conf")" = "$sum"
 check "bait date kept" test "$(stat -c %Y "$UHOME/password.txt")" = "$mt"
 check "service active again" systemctl is-active --quiet "$SERVICE"
 check "--health passes" "$HANDLER" --health
