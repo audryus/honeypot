@@ -697,7 +697,10 @@ class Health(Base):
     def test_health_stuck_watcher_only_when_asked(self):
         self.healthy()
         c = self.cfg(BAIT_FILE=self.bait, AUDIT_LOG=self.log)
-        with mock.patch.object(h, "_tick", [0]):
+        class Frozen(list):  # follow() threads left by the Follow tests write _tick[0]
+            def __setitem__(self, i, v):
+                pass
+        with mock.patch.object(h, "_tick", Frozen([0])):
             self.assertEqual(h.health(c), [])
             self.assertEqual(h.health(c, check_watcher=True), ["the audit log watcher is stuck"])
 
