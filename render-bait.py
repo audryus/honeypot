@@ -17,7 +17,7 @@ must not exist yet). Tokens:
   UPPER LOWER          A-Z0-9 / a-z0-9
   B64 B64URL           base64 alphabet (+/) / url-safe (-_)
   B58 BECH32           bitcoin base58 / bech32 alphabets
-  PASS                 password-ish: A-Za-z0-9 plus !%^*-_+= (URL-safe)
+  PASS                 password-ish: A-Za-z0-9 plus !*-_.~+= (safe in URLs)
   WORDS                seed-phrase-like English words, space separated
 """
 import os
@@ -38,7 +38,7 @@ SETS = {
     "B64URL": A + "-_",
     "B58": "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz",
     "BECH32": "qpzry9x8gf2tvdw0s3jn54khce6mua7l",
-    "PASS": A + "!%^*-_+=",
+    "PASS": A + "!*-_.~+=",  # RFC 3986 unreserved / sub-delims: valid in a URL userinfo
 }
 # Subset of the BIP39 English list (enough to look like a real seed phrase)
 WORDS = """abandon ability absorb access actor adapt afford agent alarm album anchor

@@ -7,7 +7,9 @@
 #       so your tokens and chosen names never end up in the repository):
 #           cp honeypot.conf.example honeypot.conf
 #    2. Edit it: at least pick your own STEALTH names and one notification channel.
-#    3. Run:  sudo ./install.sh
+#    3. Run:  sudo ./install.sh   (better: from a root shell with history off,
+#       see "Quick start" in README.md, so neither your shell history nor the
+#       sudo log shows the repo or which decoys you picked)
 #       install.sh copies this file to CONF_PATH (see below), root-only (mode 600).
 #
 #  FORMAT
@@ -102,6 +104,10 @@ NFT_TABLE=raw_filter
 # install time instead (see examples/README.md), e.g.:
 #     sudo ./install.sh -e .aws -e projects
 BAIT_FILE=
+# The subset of BAIT_FILE that install.sh created (decoys, missing -f files).
+# Only these are deleted by `uninstall.sh --purge`; an existing file you chose
+# to watch with -f is never deleted. Also written by install.sh: leave it alone.
+BAIT_CREATED=
 
 
 # -----------------------------------------------------------------------------
@@ -130,12 +136,16 @@ BAN_IP=yes
 # How long a ban lasts. nft time units: s, m, h, d (they can be combined).
 #   Examples: 30m, 1h, 12h, 1d, 7d, 1d12h
 #   Bans are kept in memory: a reboot or `nft flush ruleset` clears them.
+#   An invalid value falls back to 1h.
 #   List bans:  sudo <HANDLER_PATH> --bans
 #   Unban:      sudo <HANDLER_PATH> --unban 203.0.113.7
 BAN_TIMEOUT=1h
 
 # IPs that are NEVER banned (their session is still killed). Space separated,
 #   single addresses only (no ranges). Loopback is never banned anyway.
+#   The ban uses the source IP seen by the kernel (sshd's connection) or by
+#   logind, never SSH_CONNECTION from the environment: the intruder can set
+#   that to anything, e.g. one of these addresses, to dodge the ban.
 #   Put at least one machine here that you can always recover from, otherwise
 #   opening the bait by mistake from your own laptop locks it out.
 #   Example: BAN_SAFE_IPS=192.168.1.10 192.168.1.11 fd00::10
@@ -145,20 +155,22 @@ BAN_SAFE_IPS=
 # -----------------------------------------------------------------------------
 #  NOISE CONTROL (avoiding false alarms)
 # -----------------------------------------------------------------------------
-# Programs allowed to open the bait silently, given by FULL path and space
-#   separated. Typical: backup or indexing tools that read your whole home dir.
-#   Find the path in a report's "Process:" line [in brackets].
-#   Example: IGNORE_EXES=/usr/bin/restic /usr/bin/borg /usr/lib/baloo_file
-IGNORE_EXES=
+# Backup or indexing tools that read your whole home folder will set off the
+#   alarm. Exclude the bait paths in THAT tool's own configuration (restic
+#   --exclude, borg --exclude, baloo/tracker excluded folders...). There is
+#   deliberately no "allowed programs" list: an intruder could simply use the
+#   allowed program (rsync, tar, python...) to read the bait silently.
 
 # Login uids (auid) to ignore completely, space separated. auid is the user who
 #   originally logged in, even after sudo/su. Normally leave EMPTY: ignoring
-#   your own uid also ignores anyone who steals your account.
+#   your own uid also ignores anyone who steals your account. Never list
+#   4294967295 ("unset"): that ignores every daemon, cron job and web shell.
 #   Example: IGNORE_AUIDS=1001
 IGNORE_AUIDS=
 
 # One alert per session (or per process, when there's no session) within this
 #   many seconds. `cat`, an editor, a grep... can open the file several times.
+#   A plain number of seconds; an invalid value falls back to 30.
 DEBOUNCE_SECONDS=30
 
 

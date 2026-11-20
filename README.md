@@ -117,8 +117,14 @@ detection is in-kernel and can't be skipped by tools that avoid `cat`.
 ## Quick start (5 minutes)
 
 ```bash
-# 1. Get the code onto the machine you want to protect
-git clone https://github.com/audryus/honeypot.git /tmp/hp && cd /tmp/hp
+# 0. Work in a root shell with history off. `sudo ./install.sh -e .aws` would be
+#    logged by sudo (journal / auth.log, readable by adm/wheel users) and saved
+#    in your ~/.bash_history: the first places an intruder reads.
+sudo -i
+unset HISTFILE
+
+# 1. Get the code onto the machine, somewhere only root can see
+git clone https://github.com/audryus/honeypot.git /root/hp && cd /root/hp
 
 # 2. Make your private config (git-ignored) and edit it
 cp honeypot.conf.example honeypot.conf
@@ -127,12 +133,13 @@ nano honeypot.conf
 #    - set NTFY_URL (or another channel)
 #    - put your own laptop's IP in BAN_SAFE_IPS
 
-# 3. Install with one or more decoys
-sudo ./install.sh -e .aws -e projects
+# 3. Install with one or more decoys (-u: the user whose home gets the baits)
+./install.sh -u alice -e .aws -e projects
 
 # 4. You should get a test notification. Then remove all traces of the repo.
 #    (Keep a copy of your honeypot.conf somewhere safe, OFF this machine.)
-cd / && rm -rf /tmp/hp
+cd / && rm -rf /root/hp
+exit
 ```
 
 Then [test it safely](#how-to-test-it-without-locking-yourself-out).
@@ -270,6 +277,12 @@ the installer **stops** and leaves it untouched.
 sudo ./install.sh [-u user] [-e decoy]... [-f file] [-d date]
 ```
 
+> **Stealth:** `sudo` logs the full command line, decoy names included, where
+> admin users can read it. The examples here use `sudo ./install.sh` for
+> brevity; for real, run them from a root shell with history off as in the
+> [Quick start](#quick-start-5-minutes) (`sudo -i`, `unset HISTFILE`, then
+> `./install.sh -u <user> ...`). The same goes for `uninstall.sh`.
+
 Common cases:
 
 ```bash
@@ -285,9 +298,11 @@ The installer:
 
 1. Checks your names don't clash with real units or files.
 2. Installs the dependencies and enables `auditd`.
-3. Creates the decoy files with random secrets, owned by the user, mode 600,
-   with the fake old date. Folders that already existed, such as `~/.ssh`, keep
-   their original date, so nothing looks freshly touched.
+3. Creates the decoy files with random secrets, owned by the user, mode 600.
+   Every file **and folder it creates** (e.g. a new `~/.aws/`) gets the same
+   fake old date. Folders that already existed, such as `~/.ssh` or your home,
+   keep their original date, so nothing looks freshly touched. It refuses to
+   work through a symlink inside the home folder.
 4. Installs the handler (root-only, mode 700), the config, the systemd unit and
    the audit rules.
 5. Starts the service and sends a test notification.
@@ -296,8 +311,10 @@ The installer:
    machine**.
 
 It's **idempotent**: running it again with the same options changes nothing
-important. Existing bait files keep their content and your installed config
-keeps its settings.
+important. Existing bait files keep their content and their dates (`-d` only
+applies to what a run creates), and your installed config keeps its settings.
+If an install fails halfway, the previous audit rules are reloaded so the old
+setup keeps watching.
 
 ### How to test it without locking yourself out
 
@@ -390,17 +407,17 @@ Some legitimate programs open every file in a home folder: backup tools
    ```
    Process:  restic [/usr/bin/restic] pid 9123 ppid 1
    ```
-2. Add its full path to `IGNORE_EXES` in the installed config:
-   ```ini
-   IGNORE_EXES=/usr/bin/restic /usr/bin/borg
-   ```
-   This takes effect immediately.
+2. Exclude the bait paths **in that tool's own configuration**: `restic
+   --exclude`, `borg --exclude`, the excluded folders of baloo or tracker,
+   your antivirus exclusions. Or pick decoys outside the folders it scans.
 
-Alternatively, exclude the bait paths in that tool's own configuration.
+There is deliberately **no "allowed programs" list**. An intruder would just use
+the allowed program (`rsync`, `tar`, `python3`...) to read the bait silently.
 
 `IGNORE_AUIDS` ignores whole login users. **Leave it empty unless you really
 need it**: if you ignore your own uid, an intruder using your stolen account is
-ignored too.
+ignored too. Never put `4294967295` (no login user) there: that ignores every
+daemon, cron job and web shell.
 
 ### How to change settings after installing
 
@@ -448,7 +465,7 @@ moment.
 sudo ./install.sh -e .aws -e .git-credentials     # list ALL decoys you want now
 ```
 
-- Decoys already installed are kept as they are (same secrets).
+- Decoys already installed are kept as they are (same secrets, same dates).
 - New ones are created.
 - Baits you left out are **no longer watched**. The installer prints
   `note: <file> is no longer watched (delete it if unneeded)`. Delete those
@@ -481,21 +498,24 @@ sudo ./install.sh -e .aws -f /srv/backups/.db-root-password
 ```
 
 - If the file **doesn't exist**, it's created from the `password.txt` template.
-- If it **exists**, it's watched as it is and its content isn't touched. Only
-  pick files nothing legitimate reads.
-- If it sits in its own folder (not directly in home), that folder and the
-  other files in it are backdated too.
+- If it **exists**, it's watched as it is: content and dates aren't touched,
+  and `uninstall.sh --purge` never deletes it. Only pick files nothing
+  legitimate reads.
+- Folders created for a new file get the fake date too; existing folders and
+  the other files in them are left alone.
 
 ### How to create your own decoy
 
 The shipped `vpn` decoy is a small, complete model. Here's how it's built, so
 you can make your own the same way.
 
-1. Make a folder under `examples/` with the same layout as a home folder. The
-   folder name is what you pass to `-e`:
+1. Put the files under `examples/` at the path they should have **relative to
+   the home folder**. The first path component is what you pass to `-e`, and
+   everything under it is installed:
    ```
-   examples/vpn/
-   └── vpn/office-wg0.conf            → installed as ~/vpn/office-wg0.conf
+   examples/vpn/office-wg0.conf       -e vpn  → ~/vpn/office-wg0.conf
+   examples/.aws/credentials, config  -e .aws → ~/.aws/credentials, ~/.aws/config
+   examples/password.txt              -e password.txt → ~/password.txt
    ```
 2. Write the file with `@@TOKEN@@` placeholders for anything secret. Match the
    real format closely. A WireGuard key is 32 bytes, which is 43 base64
@@ -521,8 +541,8 @@ you can make your own the same way.
    and how to use it.
 3. Preview the result, then install:
    ```bash
-   mkdir -p /tmp/preview && python3 -I render-bait.py "$USER" "$(hostname -s)" \
-       examples/vpn/vpn/office-wg0.conf /tmp/preview/wg0.conf && cat /tmp/preview/wg0.conf
+   h=$(uname -n); mkdir -p /tmp/preview && python3 -I render-bait.py "$USER" "${h%%.*}" \
+       examples/vpn/office-wg0.conf /tmp/preview/wg0.conf && cat /tmp/preview/wg0.conf
    rm -rf /tmp/preview
    sudo ./install.sh -e vpn
    ```
@@ -536,7 +556,7 @@ Token reference:
 | `@@UPPER:N@@` / `@@LOWER:N@@` | A-Z0-9 / a-z0-9 |
 | `@@B64:N@@` / `@@B64URL:N@@` | base64 / url-safe base64 alphabet |
 | `@@B58:N@@` / `@@BECH32:N@@` | bitcoin alphabets |
-| `@@PASS:N@@` | password-like (letters, digits, `!%^*-_+=`), safe in URLs |
+| `@@PASS:N@@` | password-like (letters, digits, `!*-_.~+=`), safe in URLs; quote it in YAML (`!` and `*` are special there) |
 | `@@WORDS:N@@` | N seed-phrase words |
 | `@@UUID@@` | random UUID |
 | `@@KIND:N:name@@` | **same value** everywhere `name` appears in one install (e.g. a DB password in both `.env` and `docker-compose.yml`) |
@@ -554,8 +574,13 @@ Keep one private copy of the repository and your `honeypot.conf` on your
 workstation, then for each server:
 
 ```bash
-scp -r ./honeypot server1:/tmp/hp
-ssh -t server1 'cd /tmp/hp && sudo ./install.sh -e projects; rm -rf /tmp/hp'
+scp -r ./honeypot server1:.cache-sync        # bland name, your home only briefly
+ssh -t server1 sudo -i                       # root shell: sudo logs only "bash"
+# then, on server1 as root:
+unset HISTFILE
+mv ~<you>/.cache-sync /root/hp && cd /root/hp
+./install.sh -u <user> -e projects
+cd / && rm -rf /root/hp; exit
 ```
 
 Use a **different decoy mix and different STEALTH names per machine**, so one
@@ -586,11 +611,14 @@ You need the repository and the same `honeypot.conf` you installed with.
 
 ```bash
 sudo ./uninstall.sh            # remove service, handler, audit rules, firewall table
-sudo ./uninstall.sh --purge    # ...and also the config, the reports and ALL bait files
+sudo ./uninstall.sh --purge    # ...and also the config, the reports and the bait files it created
 ```
 
 - It only deletes files it recognises as its own, never a real file that
-  happens to share a name.
+  happens to share a name. `--purge` deletes only baits the installer
+  *created*: an existing file you watched with `-f` is kept. (Installs made
+  before this was tracked don't record it, so their baits are listed, not
+  deleted.)
 - With `--purge`, folders created by decoys are removed if they end up empty
   (e.g. `~/.kube`). Your real folders such as `~/.ssh` are never removed while
   they still contain your files.
@@ -613,7 +641,7 @@ Process:  cat [/usr/bin/cat] pid 48211 ppid 48190
 User:     uid alice (1000), euid alice (1000)
 Login as: alice (1000)  (session 57, tty pts1)
 Session:  sshd tty since Fri 2026-11-20 22:14:41 UTC
-Source:   203.0.113.7:51544  (203.0.113.7 51544 192.168.1.20 22)
+Source:   203.0.113.7:51544
   rDNS:   static-203-0-113-7.example-isp.net
   Geo:    Frankfurt, Hesse, DE, AS64500 Example Hosting
   sshd:   Accepted password for alice from 203.0.113.7 port 51544 ssh2
@@ -636,6 +664,11 @@ How to read it:
 - **MAC** / **DHCP** appear for LAN sources (from the ARP table and
   Pi-hole/dnsmasq leases), which helps identify a device in your home.
 - **sshd** lines show how they got in (password, key, which user).
+- **Env claims SSH_CONNECTION=...** appears when the process environment names
+  a different source than the real connection. The intruder can set that
+  variable to anything (e.g. your router's IP, so it gets banned instead), so
+  it is only reported, never banned. It also shows up harmlessly when the
+  link to sshd was broken (`setsid`, a detached `tmux`).
 
 ---
 
@@ -648,7 +681,7 @@ How to read it:
 | `-u user` | the user running `sudo` | Owner of the bait files (whose home they go into) |
 | `-e decoy` | `password.txt` when no `-e`/`-f` | Decoy from `examples/`; repeatable |
 | `-f file` | none | Extra file to watch (absolute or relative to home); created from the `password.txt` template if missing |
-| `-d date` | `97 days ago` | Fake modification date, anything `touch -d` accepts (`"2025-03-14"`, `"8 months ago"`) |
+| `-d date` | `97 days ago` | Fake modification date for the files and folders this run creates, anything `date -d` accepts (`"2025-03-14"`, `"8 months ago"`) |
 | `-h` | | Show usage |
 
 Settings and names come from `./honeypot.conf` next to the script, or from
@@ -659,7 +692,7 @@ Settings and names come from `./honeypot.conf` next to the script, or from
 | Option | Meaning |
 |---|---|
 | *(none)* | Remove service, handler, audit rules and firewall table; keep config, reports and baits |
-| `--purge` | Also delete config, reports and every bait file |
+| `--purge` | Also delete config, reports and the bait files the installer created (never an existing file watched with `-f`) |
 
 ### Handler commands
 
@@ -691,14 +724,14 @@ comments, quotes optional.
 | `AUDIT_KEY` | `pk-auth` | install + runtime | audit key tagging bait events |
 | `NFT_TABLE` | `raw_filter` | install + runtime | nftables table holding the bans |
 | `BAIT_FILE` | *(set by installer)* | runtime | space-separated list of watched files |
+| `BAIT_CREATED` | *(set by installer)* | uninstall | the baits the installer created (what `--purge` may delete) |
 | `HOST_LABEL` | hostname | runtime | machine name in alerts |
 | `KILL_SESSION` | `yes` | runtime | end the intruder's session / kill the process |
 | `BAN_IP` | `yes` | runtime | firewall-ban the source IP |
-| `BAN_TIMEOUT` | `1h` | runtime | ban duration (nft units) |
+| `BAN_TIMEOUT` | `1h` | runtime | ban duration (nft units; invalid → `1h`) |
 | `BAN_SAFE_IPS` | *(empty)* | runtime | IPs never banned |
-| `IGNORE_EXES` | *(empty)* | runtime | programs allowed to open baits silently |
 | `IGNORE_AUIDS` | *(empty)* | runtime | login uids to ignore entirely |
-| `DEBOUNCE_SECONDS` | `30` | runtime | one alert per session per window |
+| `DEBOUNCE_SECONDS` | `30` | runtime | one alert per session per window (invalid → `30`) |
 | `IP_LOOKUP` | `yes` | runtime | ipinfo.io lookup for public IPs |
 | `NTFY_URL` / `NTFY_TOKEN` | *(empty)* | runtime | ntfy channel |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | *(empty)* | runtime | Telegram channel |
@@ -740,7 +773,10 @@ comments, quotes optional.
 
 | Clue | Seen by | Mitigation |
 |---|---|---|
-| **The repository itself left on the machine** | everyone | **Delete it after installing.** This is the biggest giveaway. |
+| **The repository itself left on the machine** | everyone | **Delete it after installing.** This is the biggest giveaway. Keep it in `/root` meanwhile, not `/tmp`. |
+| **Shell history** (`git clone .../honeypot.git`, `install.sh -e .aws`) | the account's user (and an intruder using it) | Install from `sudo -i` with `unset HISTFILE` ([Quick start](#quick-start-5-minutes)); clean up `~/.bash_history` / `~/.zsh_history` if you already did it the plain way |
+| **sudo log** (`COMMAND=/…/install.sh -e .aws` in the journal / `auth.log`) | adm / wheel users | Same: from a root shell, sudo only logs the shell |
+| Package manager log shows `audit`/`nftables` being installed (`/var/log/apt/history.log`, `pacman.log`, `dnf.log`) | often everyone | Usually harmless; install them some days earlier if it matters |
 | `ps` shows `python3 <HANDLER_PATH>` | everyone | Pick a path where a Python helper is plausible |
 | A bait's *change time* (`stat` → `Change:`) is the install date | everyone | Can't be faked on Linux; only mtime/atime can |
 | `auditctl -l` lists the bait paths | root | An intruder with root owns the box anyway |
@@ -766,6 +802,11 @@ first that works:
    It never goes further up, because the parent could be your web server or
    database.
 
+The source IP comes only from places the intruder can't forge: the TCP peer of
+the `sshd` process in the process tree (as the kernel sees it), otherwise the
+login session's remote host recorded by logind. `SSH_CONNECTION` from the
+environment is reported but never trusted.
+
 When `BAN_IP=yes` and a source IP is known, it adds the IP to an nftables set
 with a timeout, dropping everything at the earliest point (including traffic to
 Docker containers), then kills that IP's open sockets with `ss -K`.
@@ -790,6 +831,13 @@ Docker containers), then kills that IP's open sockets with `ss -K`.
   `/var/log/audit/audit.log`) and auditd must be running.
 - **One alert per session per `DEBOUNCE_SECONDS`**, so a burst of reads gives
   one alert.
+- **Events that happen while the service is down are never alerted** (it
+  starts reading the audit log at its end). They are still in the audit log:
+  `sudo ausearch -k <AUDIT_KEY> -i`.
+- **The fake secrets fail a close look**: the SSH key, kubeconfig
+  certificates and seed phrase don't validate, and the cloud keys don't work.
+  That's fine because the alert fires on the *open*, before anyone can check,
+  but the intruder will know afterwards.
 - **Bait paths can't contain spaces.**
 - **It's a tripwire, not a full IDS.** Use it alongside updates, key-only SSH,
   fail2ban/CrowdSec and backups.
@@ -826,7 +874,7 @@ sudo <HANDLER_PATH> --test                       # do notifications work at all?
   until reboot. Reboot, or remove `-e 2` from your audit config if you don't
   need it.
 - `ausearch` shows the event but there's no `handled` line in the journal:
-  check `IGNORE_EXES`, `IGNORE_AUIDS`, the debounce window, and that
+  check `IGNORE_AUIDS`, the debounce window, and that
   `AUDIT_LOG` points to the real audit log.
 - The journal says `delivery failed`: read the newest report in `REPORT_DIR`.
   Its `Notify:` line has the error from each channel.
@@ -845,8 +893,8 @@ decoy. It refuses on purpose.
 for `BAN_TIMEOUT`. Then `sudo <HANDLER_PATH> --unban <your-ip>` and add your IP
 to `BAN_SAFE_IPS`.
 
-**Alerts from a backup or indexing tool**: add it to `IGNORE_EXES`
-([how](#how-to-stop-false-alarms)).
+**Alerts from a backup or indexing tool**: exclude the bait paths in that tool's
+configuration ([how](#how-to-stop-false-alarms)).
 
 **I lost my `honeypot.conf` and need to uninstall**: as root, recover the names
 from the installed config:

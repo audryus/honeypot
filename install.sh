@@ -7,8 +7,9 @@
 #     Files that already exist (real ones) are never overwritten: install aborts.
 # -f  watch this file instead/as well, absolute or relative to that user's home.
 #     Created from examples/password.txt if missing; an existing file is watched
-#     as is. If it sits in its own folder, that folder and its files are backdated.
-# -d  fake modification date, anything `touch -d` accepts (default: "97 days ago")
+#     as is (content and dates untouched).
+# -d  fake modification date for the files and folders this run creates,
+#     anything `date -d` accepts (default: "97 days ago")
 # No -e/-f: same as -e password.txt.   List decoys: ls -A examples/
 # Settings and on-disk names come from ./honeypot.conf next to this script
 # (falls back to honeypot.conf.example). See the STEALTH section in that file.
@@ -29,7 +30,7 @@ while getopts "u:e:f:d:h" o; do
     e) EXAMPLES+=("${OPTARG%/}") ;;
     f) FILE_NAME=$OPTARG ;;
     d) FAKE_DATE=$OPTARG ;;
-    *) sed -n '2,14p' "$0"; exit 1 ;;
+    *) sed -n '2,15p' "$0"; exit 1 ;;
   esac
 done
 [[ ${#EXAMPLES[@]} -eq 0 && -z $FILE_NAME ]] && EXAMPLES=(password.txt)
@@ -39,7 +40,14 @@ step() { echo -e "\n==> $*"; }
 [[ $EUID -eq 0 ]] || die "run with sudo"
 [[ -n $TARGET_USER ]] || die "cannot detect user, pass -u <user>"
 HOME_DIR=$(getent passwd "$TARGET_USER" | cut -d: -f6) || die "unknown user $TARGET_USER"
-touch -d "$FAKE_DATE" /dev/null 2>/dev/null || die "invalid date for -d: $FAKE_DATE"
+# Canonical form (e.g. /home -> /var/home), so the symlink check below is exact
+HOME_DIR=$(realpath -e "$HOME_DIR" 2>/dev/null) || die "home folder of $TARGET_USER doesn't exist"
+TARGET_GROUP=$(id -gn "$TARGET_USER") || die "no primary group for $TARGET_USER"
+date -d "$FAKE_DATE" >/dev/null 2>&1 || die "invalid date for -d: $FAKE_DATE"
+# Short hostname for the templates. Not `hostname -s`: that command is missing
+# on minimal installs (e.g. Arch) and an empty value renders obviously fake baits.
+HOST_SHORT=$(uname -n); HOST_SHORT=${HOST_SHORT%%.*}
+[[ -n $HOST_SHORT ]] || die "cannot determine the hostname"
 
 load_names
 echo "Using settings from $SRC_CONF"
@@ -48,14 +56,29 @@ echo "Using settings from $SRC_CONF"
 # --- work out the bait files ------------------------------------------------
 # Baits from an earlier run may be re-used (their content is kept); any other
 # existing file is someone's real data and is refused.
-PREV_BAITS=" $(conf_get "$CONF_PATH" BAIT_FILE) $(conf_get "$LEGACY_CONF" BAIT_FILE) "
+# Paths are compared in canonical form (an older install may have recorded them
+# through a symlinked /home).
+canon_list() { local p; for p in $1; do realpath -m -- "$p"; done | tr '\n' ' '; }
+PREV_BAITS=" $(canon_list "$(conf_get "$CONF_PATH" BAIT_FILE) $(conf_get "$LEGACY_CONF" BAIT_FILE)") "
+# Baits an earlier run created (vs. existing files watched with -f): only those
+# are deleted by `uninstall.sh --purge`.
+PREV_CREATED=" $(canon_list "$(conf_get "$CONF_PATH" BAIT_CREATED)") "
 BAITS=()   # every file to watch
 PAIRS=()   # template -> destination, for files that must be created
-add_bait() { # dst [template]
+CREATED=() # baits created by an install (this one or an earlier one)
+add_bait() { # dst template ours(yes|no)
   [[ $1 =~ [[:space:]] ]] && die "bait paths can't contain spaces: $1"
   [[ -d $1 ]] && die "$1 is a directory, not a file"
+  # We run as root inside a user's home: never follow a symlink planted there
+  # (e.g. ~/.aws -> /etc/cron.d would make root create and chown a file in /etc).
+  [[ $(realpath -m -- "$1") == "$1" ]] || die "$1 goes through a symlink, refusing"
+  [[ " ${BAITS[*]} " == *" $1 "* ]] && return 0   # same path given twice
   BAITS+=("$1")
-  if [[ ! -e $1 && -n ${2:-} ]]; then PAIRS+=("$2" "$1"); fi
+  if [[ ! -e $1 ]]; then
+    PAIRS+=("$2" "$1"); CREATED+=("$1")
+  elif [[ $3 == yes || $PREV_CREATED == *" $1 "* ]]; then
+    CREATED+=("$1")
+  fi
 }
 for ex in "${EXAMPLES[@]}"; do
   [[ $ex != *..* && $ex != /* && -e $HERE/examples/$ex ]] || die "no such example: examples/$ex (see: ls -A $HERE/examples)"
@@ -64,7 +87,7 @@ for ex in "${EXAMPLES[@]}"; do
     if [[ -e $dst && $PREV_BAITS != *" $dst "* ]]; then
       die "$dst already exists and looks real (not a bait from an earlier install). Not touching it: pick another example or remove that file from examples/$ex"
     fi
-    add_bait "$dst" "$HERE/examples/$rel"
+    add_bait "$dst" "$HERE/examples/$rel" yes   # decoys never adopt a real file
   done < <(cd "$HERE/examples" && find "$ex" -type f ! -name README.md -print0 | sort -z)
 done
 if [[ -n $FILE_NAME ]]; then
@@ -73,7 +96,7 @@ if [[ -n $FILE_NAME ]]; then
     *)  BAIT="$HOME_DIR/$FILE_NAME" ;;
   esac
   BAIT=$(realpath -m "$BAIT")
-  add_bait "$BAIT" "$HERE/examples/password.txt"
+  add_bait "$BAIT" "$HERE/examples/password.txt" no
 fi
 [[ ${#BAITS[@]} -gt 0 ]] || die "no bait files"
 
@@ -110,10 +133,25 @@ systemctl enable --now auditd >/dev/null 2>&1 || true
 # Re-runs: unload the old rules first so preparing the bait doesn't trigger an alert
 auditctl -D -k "$AUDIT_KEY" >/dev/null 2>&1 || true
 auditctl -D -k "$LEGACY_KEY" >/dev/null 2>&1 || true
+# From here on the trap is disarmed: if anything below fails, reload whatever
+# rules file is on disk so the previous install keeps watching.
+rearm_on_failure() {
+  local rc=$? f k
+  [[ $rc -ne 0 ]] || return 0
+  for f in "$RULES_FILE:$AUDIT_KEY" "$LEGACY_RULES:$LEGACY_KEY"; do
+    k=${f##*:}; f=${f%:*}
+    [[ -f $f ]] && rules_is_ours "$f" "$k" || continue
+    auditctl -l 2>/dev/null | grep -q -- "-k $k\$" && continue
+    auditctl -c -R "$f" >/dev/null 2>&1 && echo "install failed: reloaded the previous audit rules from $f" >&2
+  done
+}
+trap rearm_on_failure EXIT
 
 step "Creating bait files"
-# Everything should look old and forgotten. Note: ctime/birth time (stat) can't
-# be faked, only mtime/atime.
+# Everything new should look old and forgotten: files and folders this run
+# creates get FAKE_DATE, folders that already existed keep their own date, and
+# existing baits (earlier runs, -f files) are left alone. Note: ctime/birth time
+# (stat) can't be faked, only mtime/atime.
 declare -A KEEP_MTIME=()   # existing folders we add files to: restore their mtime
 NEW_DIRS=()                # folders we create: backdate them
 for ((i = 1; i < ${#PAIRS[@]}; i += 2)); do
@@ -121,28 +159,21 @@ for ((i = 1; i < ${#PAIRS[@]}; i += 2)); do
   while [[ ! -d $d ]]; do chain=("$d" "${chain[@]}"); d=$(dirname "$d"); done
   [[ -n ${KEEP_MTIME[$d]:-} ]] || KEEP_MTIME[$d]=$(stat -c %Y "$d")
   for c in "${chain[@]}"; do
-    install -d -o "$TARGET_USER" -g "$TARGET_USER" -m 700 "$c"
+    install -d -o "$TARGET_USER" -g "$TARGET_GROUP" -m 700 "$c"
     NEW_DIRS+=("$c")
   done
 done
 if [[ ${#PAIRS[@]} -gt 0 ]]; then
-  python3 -I "$HERE/render-bait.py" "$TARGET_USER" "$(hostname -s)" "${PAIRS[@]}"
+  python3 -I "$HERE/render-bait.py" "$TARGET_USER" "$HOST_SHORT" "${PAIRS[@]}"
 fi
 for ((i = 1; i < ${#PAIRS[@]}; i += 2)); do
-  chown "$TARGET_USER:$TARGET_USER" "${PAIRS[i]}"
+  chown -h "$TARGET_USER:$TARGET_GROUP" "${PAIRS[i]}"
+  touch -h -d "$FAKE_DATE" "${PAIRS[i]}"
   echo "created ${PAIRS[i]}"
 done
-for b in "${BAITS[@]}"; do
-  [[ -e $b ]] || die "bait $b missing"
-  touch -d "$FAKE_DATE" "$b"
-done
-for d in "${!KEEP_MTIME[@]}"; do touch -d "@${KEEP_MTIME[$d]}" "$d"; done
-for d in "${NEW_DIRS[@]}"; do touch -d "$FAKE_DATE" "$d"; done
-# -f in its own folder: make the neighbours look just as old (original behaviour)
-if [[ -n $FILE_NAME && $(dirname "$BAIT") != "$HOME_DIR" ]]; then
-  find "$(dirname "$BAIT")" -maxdepth 1 -type f -exec touch -d "$FAKE_DATE" {} +
-  touch -d "$FAKE_DATE" "$(dirname "$BAIT")"
-fi
+for b in "${BAITS[@]}"; do [[ -e $b ]] || die "bait $b missing"; done
+for d in "${!KEEP_MTIME[@]}"; do touch -h -d "@${KEEP_MTIME[$d]}" "$d"; done
+for d in "${NEW_DIRS[@]}"; do touch -h -d "$FAKE_DATE" "$d"; done
 ls -la "${BAITS[@]}"
 for b in $PREV_BAITS; do
   [[ " ${BAITS[*]} " == *" $b "* || ! -e $b ]] || echo "note: $b is no longer watched (delete it if unneeded)"
@@ -173,12 +204,13 @@ sed -i "s|^CONF_PATH = .*|CONF_PATH = os.environ.get(\"HONEYPOT_CONF\", \"$CONF_
 step "Installing config -> $CONF_PATH"
 mkdir -p "$(dirname "$CONF_PATH")"
 if [[ -f $CONF_PATH ]]; then
-  echo "exists, keeping your settings (only names and BAIT_FILE are updated)"
+  echo "exists, keeping your settings (only the names and the bait lists are updated)"
 else
   install -m 600 -o root -g root "$SRC_CONF" "$CONF_PATH"
 fi
 for k in "${NAME_KEYS[@]}"; do conf_set "$CONF_PATH" "$k" "${!k}"; done
 conf_set "$CONF_PATH" BAIT_FILE "${BAITS[*]}"
+conf_set "$CONF_PATH" BAIT_CREATED "${CREATED[*]}"
 chmod 600 "$CONF_PATH"
 
 step "Installing service -> $UNIT_FILE"

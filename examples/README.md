@@ -40,8 +40,10 @@ untouched.
 
 ## Writing your own
 
-Put files under `examples/<name>/` using the same layout as the home folder,
-then install with `-e <name>`. Tokens (the full reference is in `render-bait.py`):
+Put each file at the path it should have relative to the home folder, e.g.
+`examples/vpn/office-wg0.conf` lands at `~/vpn/office-wg0.conf`. The first path
+component is the decoy name (`-e vpn`), and everything under it is installed.
+Tokens (the full reference is in `render-bait.py`):
 
 | Token | Becomes |
 |---|---|
@@ -50,7 +52,7 @@ then install with `-e <name>`. Tokens (the full reference is in `render-bait.py`
 | `@@UPPER:16@@`, `@@LOWER:8@@` | A-Z0-9, a-z0-9 |
 | `@@B64:40@@`, `@@B64URL:43@@` | base64 / url-safe base64 alphabet |
 | `@@B58:105@@`, `@@BECH32:38@@` | bitcoin alphabets |
-| `@@PASS:24@@` | password-like, safe inside URLs |
+| `@@PASS:24@@` | password-like, safe inside URLs (quote it in YAML: it may start with `!` or `*`) |
 | `@@WORDS:12@@` | seed-phrase-like word list |
 | `@@UUID@@` | random UUID |
 | `@@KIND:N:name@@` | same value everywhere `name` is used in one install (e.g. a DB password in both `.env` and `docker-compose.yml`) |

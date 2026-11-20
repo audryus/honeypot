@@ -52,7 +52,6 @@ DEFAULTS = {
     "BAN_TIMEOUT": "1h",
     "BAN_SAFE_IPS": "",          # never banned (session is still killed)
     # noise control
-    "IGNORE_EXES": "",           # full paths, space separated: skip entirely
     "IGNORE_AUIDS": "",          # login uids to skip entirely
     "DEBOUNCE_SECONDS": "30",
     # enrichment
@@ -96,6 +95,31 @@ def load_conf():
 
 def yes(v):
     return str(v).strip().lower() in ("1", "yes", "true", "on")
+
+
+def seconds(cfg, key):
+    """A numeric setting; a typo falls back to the default instead of raising
+    (an exception here would drop the alert)."""
+    try:
+        return float(cfg[key])
+    except (TypeError, ValueError):
+        return float(DEFAULTS[key])
+
+
+def ban_timeout(cfg):
+    v = cfg["BAN_TIMEOUT"].strip()
+    return v if re.fullmatch(r"(\d+[smhd])+", v) else DEFAULTS["BAN_TIMEOUT"]
+
+
+def norm_ip(s):
+    """Canonical IP string ('[::ffff:1.2.3.4]' -> '1.2.3.4'), or None."""
+    try:
+        a = ipaddress.ip_address(str(s).strip().strip("[]"))
+    except ValueError:
+        return None
+    if a.version == 6 and a.ipv4_mapped:
+        a = a.ipv4_mapped
+    return str(a)
 
 
 def log(*a):
@@ -198,18 +222,21 @@ def ensure_nft(cfg):
 
 
 def ban_ip(ip, cfg, actions):
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
+    n = norm_ip(ip)
+    if not n:
+        actions.append(f"NOT banned {ip} (not an IP address)")
         return
-    if addr.is_loopback or ip in cfg["BAN_SAFE_IPS"].split():
+    ip, addr = n, ipaddress.ip_address(n)
+    safe = {norm_ip(x) for x in cfg["BAN_SAFE_IPS"].split()}
+    if addr.is_loopback or ip in safe:
         actions.append(f"NOT banned {ip} (loopback / BAN_SAFE_IPS)")
         return
     ensure_nft(cfg)
     s = "banned4" if addr.version == 4 else "banned6"
+    timeout = ban_timeout(cfg)
     rc, _, err = run(["nft", "add", "element", "inet", cfg["NFT_TABLE"], s,
-                      f"{{ {ip} timeout {cfg['BAN_TIMEOUT']} }}"])
-    actions.append(f"banned {ip} for {cfg['BAN_TIMEOUT']}" if rc == 0 else f"ban {ip} failed: {err}")
+                      f"{{ {ip} timeout {timeout} }}"])
+    actions.append(f"banned {ip} for {timeout}" if rc == 0 else f"ban {ip} failed: {err}")
     rc, out, _ = run(["ss", "-K", "-H", "dst", ip])
     n = len([l for l in out.splitlines() if l.strip()])
     if n:
@@ -266,21 +293,24 @@ def session_info(ses):
 
 
 def find_remote(procs, sess):
-    for p in procs:
-        if p.get("ssh"):
-            parts = p["ssh"].split()
-            return parts[0], (parts[1] if len(parts) > 1 else ""), p["ssh"]
-    if sess.get("RemoteHost"):
-        return sess["RemoteHost"], "", ""
-    for p in procs:  # sshd process -> its TCP peer
-        if p["comm"].startswith("sshd") and p["ppid"] != 1:
-            rc, out, _ = run(["ss", "-tnpH", "state", "established"])
+    """Source (ip, port, claimed). Only sources the intruder can't forge are
+    trusted: the kernel's view of the sshd process's TCP peer, then logind's
+    RemoteHost (set by sshd through PAM). SSH_CONNECTION comes from the process
+    environment, which the intruder controls (`export SSH_CONNECTION="<your
+    router> 1 2 22"` would get the wrong IP banned), so it is only returned as
+    `claimed`, for the report."""
+    claimed = next((p["ssh"] for p in procs if p.get("ssh")), "")
+    sshds = [p["pid"] for p in procs if p["comm"].startswith("sshd") and p["ppid"] != 1]
+    if sshds:
+        out = run(["ss", "-tnpH", "state", "established"])[1]
+        for pid in sshds:
             for l in out.splitlines():
-                if f"pid={p['pid']}," in l:
-                    peer = l.split()[3]
-                    ip, _, port = peer.rpartition(":")
-                    return ip.strip("[]"), port, ""
-    return "", "", ""
+                if f"pid={pid}," in l:
+                    ip, _, port = l.split()[3].rpartition(":")
+                    return norm_ip(ip) or ip.strip("[]"), port, claimed
+    if sess.get("RemoteHost"):
+        return norm_ip(sess["RemoteHost"]) or sess["RemoteHost"], "", claimed
+    return "", "", claimed
 
 
 def ip_details(ip, cfg):
@@ -317,14 +347,17 @@ def ip_details(ip, cfg):
 
 def ausearch(serial):
     time.sleep(0.7)  # let auditd flush the rest of the event
-    rc, out, _ = run(["ausearch", "-a", serial, "-i"], timeout=6)
+    # -ts recent: serial numbers restart at every boot, so without a time bound
+    # an older event with the same serial would be picked up
+    rc, out, _ = run(["ausearch", "-a", serial, "-ts", "recent", "-i"], timeout=6)
     d = {}
     for key, rx in (("proctitle", r"proctitle=(.*)$"), ("cwd", r"type=CWD .*cwd=(\S+)"),
                     ("syscall", r"syscall=(\S+)"), ("exit", r" exit=(\S+)")):
         m = re.search(rx, out, re.M)
         if m:
             d[key] = m.group(1).strip()
-    d["names"] = re.findall(r"type=PATH .*?\bname=(\S+)", out)
+    d["paths"] = [dict(re.findall(r"\b(name|inode|dev)=(\S+)", l))
+                  for l in out.splitlines() if l.startswith("type=PATH")]
     d["raw"] = out
     return d
 
@@ -376,20 +409,20 @@ def handle(line):
     cfg = load_conf()
     ev = parse_audit(line)
     pid = ev.get("pid", "0")
-    if ev.get("exe") in cfg["IGNORE_EXES"].split() or ev.get("auid") in cfg["IGNORE_AUIDS"].split():
+    if ev.get("auid") in cfg["IGNORE_AUIDS"].split():
         return
     ses = ev.get("ses", "")
     dkey = ses if ses not in UNSET else f"pid{pid}"
     with _lock:
         now = time.time()
-        if now - _last_seen.get(dkey, 0) < float(cfg["DEBOUNCE_SECONDS"]):
+        if now - _last_seen.get(dkey, 0) < seconds(cfg, "DEBOUNCE_SECONDS"):
             return
         _last_seen[dkey] = now
 
     # snapshot fast, before anything gets killed
     procs = proc_chain(pid) or proc_chain(ev.get("ppid", 0))
     sess = session_info(ses)
-    ip, port, sshconn = find_remote(procs, sess)
+    ip, port, claimed = find_remote(procs, sess)
     others = run(["who"])[1]
 
     actions = []
@@ -404,7 +437,7 @@ def handle(line):
     ipd = ip_details(ip, cfg) if ip else {}
     when = datetime.fromtimestamp(float(ev.get("_ts", time.time()))).strftime("%Y-%m-%d %H:%M:%S")
     container = next((p["container"] for p in procs if p.get("container")), "")
-    opened = which_bait(cfg["BAIT_FILE"].split(), au.get("names", []))
+    opened = which_bait(cfg["BAIT_FILE"].split(), au.get("paths", []), au.get("cwd", ""))
 
     L = [
         f"File:     {opened}",
@@ -419,8 +452,9 @@ def handle(line):
     ]
     if sess:
         L.append(f"Session:  {sess.get('Service', '?')} {sess.get('Type', '')} since {sess.get('Timestamp', '?')}")
+    claimed_ip = norm_ip(claimed.split()[0]) if claimed.split() else None
     if ip:
-        L.append(f"Source:   {ip}{':' + port if port else ''}" + (f"  ({sshconn})" if sshconn else ""))
+        L.append(f"Source:   {ip}{':' + port if port else ''}")
         for k, label in (("rdns", "rDNS"), ("mac", "MAC"), ("dhcp", "DHCP"), ("geo", "Geo")):
             if ipd.get(k):
                 L.append(f"  {label + ':':6}  {ipd[k]}")
@@ -428,6 +462,9 @@ def handle(line):
             L.append(f"  sshd:   {s}")
     else:
         L.append("Source:   no network session found (local / service / container)")
+    if claimed and claimed_ip != ip:
+        # forged, or the chain to sshd was broken (setsid, tmux...): report only
+        L.append(f"  Env claims SSH_CONNECTION={claimed}  (not trusted, not banned)")
     if container:
         L.append(f"Container: {container}  (docker ps | grep {container})")
     if procs:
@@ -438,7 +475,8 @@ def handle(line):
     body = "\n".join(L)
     title = f"Honeypot triggered on {host(cfg)}"
 
-    event = {"audit": ev, "session": sess, "ip": ip, "ip_details": ipd, "actions": actions,
+    event = {"audit": ev, "session": sess, "ip": ip, "ssh_connection_claimed": claimed,
+             "ip_details": ipd, "actions": actions,
              "processes": procs, "container": container}
     results = notify(cfg, title, body, event)
 
@@ -453,14 +491,37 @@ def handle(line):
     log(f"request {ev.get('_serial', '?')} handled ({'delivered' if ok else 'delivery failed'}): {rpt}")
 
 
-def which_bait(baits, names):
-    """Which of the (possibly many) bait files was touched, from the PATH records."""
-    for n in names:
-        n = n.strip('"')
-        rel = n[2:] if n.startswith("./") else n
-        for b in baits:
-            if n == b or b.endswith("/" + rel):
-                return b
+def which_bait(baits, paths, cwd=""):
+    """Which of the (possibly many) bait files was touched, from the PATH records.
+    By inode first (a relative name like "config" can't tell ~/.aws/config from
+    ~/.kube/config); stat() doesn't open the file, so it can't trigger."""
+    ids = {}
+    for b in baits:
+        try:
+            st = os.stat(b)
+            ids[(str(st.st_ino), f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}")] = b
+        except OSError:
+            pass
+    for p in paths:
+        hit = ids.get((p.get("inode"), p.get("dev")))
+        if hit:
+            return hit
+        # btrfs: stat() reports a per-subvolume dev, audit the superblock's one
+        same = [b for (ino, _), b in ids.items() if ino == p.get("inode")]
+        if len(same) == 1:
+            return same[0]
+    for p in paths:  # fall back to names (e.g. the bait was replaced since)
+        n = p.get("name", "").strip('"')
+        if not n or n == "(null)":
+            continue
+        full = os.path.normpath(os.path.join(cwd, n)) if cwd and not n.startswith("/") else n
+        if full in baits:
+            return full
+        cands = [b for b in baits if b.endswith("/" + os.path.normpath(n))]
+        if len(cands) == 1:
+            return cands[0]
+        if cands:
+            return f"one of: {' '.join(cands)}"
     if len(baits) == 1:
         return baits[0]
     return f"one of: {' '.join(baits)}" if baits else "?"
@@ -469,24 +530,26 @@ def which_bait(baits, names):
 def follow(path):
     """Yield new lines appended to path, surviving log rotation. Done in-process
     (instead of `tail -F`) so no tell-tale child process shows up in ps."""
-    f, ino, buf, first = None, None, "", True
+    # Binary mode: tell() is then an exact byte offset (in text mode it is an
+    # opaque cookie, which could fake a "truncated" log and replay old events).
+    f, ino, buf, first = None, None, b"", True
     while True:
         if f is None:
             try:
-                f = open(path, errors="replace")
+                f = open(path, "rb")
                 ino = os.fstat(f.fileno()).st_ino
                 if first:
                     f.seek(0, os.SEEK_END)  # only new events, like tail -n0
-                first, buf = False, ""
+                first, buf = False, b""
             except OSError:
                 time.sleep(1)
                 continue
         chunk = f.readline()
         if chunk:
             buf += chunk
-            if buf.endswith("\n"):
-                yield buf
-                buf = ""
+            if buf.endswith(b"\n"):
+                yield buf.decode(errors="replace")
+                buf = b""
             continue
         time.sleep(0.2)
         try:
@@ -531,8 +594,11 @@ def main():
             print(run(["nft", "list", "set", "inet", cfg["NFT_TABLE"], s])[1])
     elif a[0] == "--unban" and len(a) == 2:
         cfg = load_conf()
-        s = "banned4" if ipaddress.ip_address(a[1]).version == 4 else "banned6"
-        rc, _, err = run(["nft", "delete", "element", "inet", cfg["NFT_TABLE"], s, f"{{ {a[1]} }}"])
+        ip = norm_ip(a[1])
+        if not ip:
+            sys.exit(f"not an IP address: {a[1]}")
+        s = "banned4" if ipaddress.ip_address(ip).version == 4 else "banned6"
+        rc, _, err = run(["nft", "delete", "element", "inet", cfg["NFT_TABLE"], s, f"{{ {ip} }}"])
         print("unbanned" if rc == 0 else err)
     else:
         print(__doc__)
