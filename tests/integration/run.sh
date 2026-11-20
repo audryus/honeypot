@@ -197,6 +197,8 @@ else
   sed -i -E "s/$NEVER_RE/# &/" /etc/audit/rules.d/*.rules
 fi
 augenrules --load >/dev/null 2>&1
+# augenrules only clears loaded rules if the rules have a -D line (Arch's don't)
+auditctl -d task,never >/dev/null 2>&1; auditctl -d never,task >/dev/null 2>&1
 check_not "rule gone" bash -c "auditctl -l | grep -qxE '$NEVER_RE'"
 endgroup
 

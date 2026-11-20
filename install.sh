@@ -199,9 +199,9 @@ probe_syscalls() {
 preflight_audit() { # auditctl -l output
   local f
   f=$(grep -lxE -- "$NEVER_TASK_RE" "$AUDIT_RULES_DIR"/*.rules 2>/dev/null | head -n1 || true)
-  [[ -z $f ]] || die "$f has a '-a task,never' rule: it turns off syscall auditing for every process, so the bait could never fire. Comment that line out, then re-run (the installer reloads the rules)"
+  [[ -z $f ]] || die "$f has a '-a task,never' rule: it turns off syscall auditing for every process, so the bait could never fire. Comment that line out, unload it (auditctl -d task,never), then re-run"
   if grep -qxE -- "$NEVER_TASK_RE" <<<"$1"; then
-    die "a '-a never,task' audit rule is loaded (auditctl -l): it turns off syscall auditing for every process, so the bait could never fire. Find where it comes from (grep -r never /etc/audit), remove it, then re-run"
+    die "a '-a never,task' audit rule is loaded (auditctl -l): it turns off syscall auditing for every process, so the bait could never fire. Unload it (auditctl -d task,never or -d never,task), remove it where it comes from (grep -r never /etc/audit), then re-run"
   fi
 }
 
