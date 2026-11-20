@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Bait-file tripwire installer (idempotent: safe to re-run).
-#   sudo ./install.sh [-u user] [-e example]... [-f file] [-d date]
+#   sudo ./install.sh [-u user] [-e example]... [-f file]... [-d date]
 # -u  user owning the bait            (default: the one running sudo)
 # -e  decoy from examples/ (repeatable), copied into that user's home with fresh
 #     random secrets; EVERY file of it is watched.  e.g. -e .aws -e .git-credentials
 #     Files that already exist (real ones) are never overwritten: install aborts.
-# -f  watch this file instead/as well, absolute or relative to that user's home.
+# -f  watch this file (repeatable), absolute or relative to that user's home.
 #     Created from examples/password.txt if missing; an existing file is watched
-#     as is (content and dates untouched).
+#     as is (content and dates untouched). Paths through a symlink are refused.
 # -d  fake modification date for the files and folders this run creates,
 #     anything `date -d` accepts (default: "97 days ago")
 # No -e/-f: same as -e password.txt.   List decoys: ls -A examples/
@@ -21,19 +21,19 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 TARGET_USER=${SUDO_USER:-}
 EXAMPLES=()
-FILE_NAME=""
+FILES=()
 FAKE_DATE="97 days ago"
 
 while getopts "u:e:f:d:h" o; do
   case $o in
     u) TARGET_USER=$OPTARG ;;
-    e) EXAMPLES+=("${OPTARG%/}") ;;
-    f) FILE_NAME=$OPTARG ;;
+    e) ex=${OPTARG%/}; EXAMPLES+=("${ex#./}") ;;
+    f) FILES+=("$OPTARG") ;;
     d) FAKE_DATE=$OPTARG ;;
     *) sed -n '2,15p' "$0"; exit 1 ;;
   esac
 done
-[[ ${#EXAMPLES[@]} -eq 0 && -z $FILE_NAME ]] && EXAMPLES=(password.txt)
+[[ ${#EXAMPLES[@]} -eq 0 && ${#FILES[@]} -eq 0 ]] && EXAMPLES=(password.txt)
 
 step() { echo -e "\n==> $*"; }
 
@@ -58,7 +58,7 @@ echo "Using settings from $SRC_CONF"
 # existing file is someone's real data and is refused.
 # Paths are compared in canonical form (an older install may have recorded them
 # through a symlinked /home).
-canon_list() { local p; for p in $1; do realpath -m -- "$p"; done | tr '\n' ' '; }
+canon_list() { local p a; read -ra a <<<"$1"; for p in "${a[@]}"; do realpath -m -- "$p"; done | tr '\n' ' '; }
 PREV_BAITS=" $(canon_list "$(conf_get "$CONF_PATH" BAIT_FILE) $(conf_get "$LEGACY_CONF" BAIT_FILE)") "
 # Baits an earlier run created (vs. existing files watched with -f): only those
 # are deleted by `uninstall.sh --purge`.
@@ -66,38 +66,43 @@ PREV_CREATED=" $(canon_list "$(conf_get "$CONF_PATH" BAIT_CREATED)") "
 BAITS=()   # every file to watch
 PAIRS=()   # template -> destination, for files that must be created
 CREATED=() # baits created by an install (this one or an earlier one)
-add_bait() { # dst template ours(yes|no)
-  [[ $1 =~ [[:space:]] ]] && die "bait paths can't contain spaces: $1"
+add_bait() { # dst(absolute, normalised) template
+  # Lists are space separated and expanded unquoted by older tools: no blanks or globs
+  [[ $1 =~ [[:space:]*?[] ]] && die "bait paths can't contain spaces or * ? [ : $1"
   [[ -d $1 ]] && die "$1 is a directory, not a file"
   # We run as root inside a user's home: never follow a symlink planted there
-  # (e.g. ~/.aws -> /etc/cron.d would make root create and chown a file in /etc).
-  [[ $(realpath -m -- "$1") == "$1" ]] || die "$1 goes through a symlink, refusing"
+  # (e.g. ~/.aws -> /etc/profile.d would make root create a file there and
+  # hand it to the user).
+  no_symlink "$1" || die "$1 goes through a symlink (it leads to $(realpath -m -- "$1")), refusing. If that's really the file you mean, pass its real path with -f"
   [[ " ${BAITS[*]} " == *" $1 "* ]] && return 0   # same path given twice
   BAITS+=("$1")
   if [[ ! -e $1 ]]; then
     PAIRS+=("$2" "$1"); CREATED+=("$1")
-  elif [[ $3 == yes || $PREV_CREATED == *" $1 "* ]]; then
+  elif [[ $PREV_CREATED == *" $1 "* ]]; then
+    # Only a file an install provably created may ever be purged. An existing
+    # file (e.g. a real one watched with -f earlier, even if a decoy now has
+    # the same path) is never marked as created.
     CREATED+=("$1")
   fi
 }
 for ex in "${EXAMPLES[@]}"; do
-  [[ $ex != *..* && $ex != /* && -e $HERE/examples/$ex ]] || die "no such example: examples/$ex (see: ls -A $HERE/examples)"
+  [[ -n $ex && $ex != . && $ex != *..* && $ex != /* && -e $HERE/examples/$ex ]] || die "no such example: examples/$ex (see: ls -A $HERE/examples)"
   while IFS= read -r -d '' rel; do
     dst="$HOME_DIR/$rel"
     if [[ -e $dst && $PREV_BAITS != *" $dst "* ]]; then
       die "$dst already exists and looks real (not a bait from an earlier install). Not touching it: pick another example or remove that file from examples/$ex"
     fi
-    add_bait "$dst" "$HERE/examples/$rel" yes   # decoys never adopt a real file
+    add_bait "$dst" "$HERE/examples/$rel"
   done < <(cd "$HERE/examples" && find "$ex" -type f ! -name README.md -print0 | sort -z)
 done
-if [[ -n $FILE_NAME ]]; then
-  case $FILE_NAME in
-    /*) BAIT=$FILE_NAME ;;
-    *)  BAIT="$HOME_DIR/$FILE_NAME" ;;
+for f in "${FILES[@]}"; do
+  case $f in
+    /*) b=$f ;;
+    *)  b="$HOME_DIR/$f" ;;
   esac
-  BAIT=$(realpath -m "$BAIT")
-  add_bait "$BAIT" "$HERE/examples/password.txt" no
-fi
+  # -s: tidy up . and .. but DON'T resolve symlinks, so add_bait can refuse them
+  add_bait "$(realpath -m -s -- "$b")" "$HERE/examples/password.txt"
+done
 [[ ${#BAITS[@]} -gt 0 ]] || die "no bait files"
 
 # --- refuse names that would clobber something real -------------------------
@@ -130,14 +135,45 @@ else
 fi
 systemctl enable --now auditd >/dev/null 2>&1 || true
 
+# Not `-p r`: its read class includes getxattr/listxattr, which `ls -l` calls on
+# every file. Instead watch the open syscalls themselves (names vary per arch).
+# Probed now so a box where this can't work fails before anything is created.
+declare -A SC=()
+for arch in b64 b32; do
+  SC[$arch]=""
+  for s in open openat openat2 open_by_handle_at; do
+    ausyscall "$arch" "$s" --exact >/dev/null 2>&1 && SC[$arch]+=" -S $s"
+  done
+done
+[[ -n ${SC[b64]}${SC[b32]} ]] || die "ausyscall can't resolve the open syscalls: reads of the bait would go unnoticed"
+
 # Re-runs: unload the old rules first so preparing the bait doesn't trigger an alert
 auditctl -D -k "$AUDIT_KEY" >/dev/null 2>&1 || true
 auditctl -D -k "$LEGACY_KEY" >/dev/null 2>&1 || true
-# From here on the trap is disarmed: if anything below fails, reload whatever
-# rules file is on disk so the previous install keeps watching.
-rearm_on_failure() {
-  local rc=$? f k
+# From here on the trap is disarmed. If anything below fails:
+#  - before the config records the new baits: delete the files and folders
+#    this run created (else a re-run refuses them as "real" files, and a
+#    leftover folder would keep today's date and look freshly made);
+#  - always: reload whatever rules file is on disk so the previous install
+#    keeps watching.
+declare -A KEEP_MTIME=()   # existing folders we add files to: restore their mtime
+NEW_DIRS=()                # folders we create: backdate them
+RENDERED=no                # render-bait.py wrote every file in PAIRS
+COMMITTED=no               # the installed config lists the new baits
+on_failure() {
+  local rc=$? f k i
   [[ $rc -ne 0 ]] || return 0
+  set +e   # best effort: one failing step must not skip the rest (rule reload!)
+  if [[ $COMMITTED == no ]]; then
+    if [[ $RENDERED == yes ]]; then
+      for ((i = 1; i < ${#PAIRS[@]}; i += 2)); do
+        no_symlink "${PAIRS[i]}" && rm -f -- "${PAIRS[i]}"
+      done
+    fi
+    for ((i = ${#NEW_DIRS[@]} - 1; i >= 0; i--)); do rmdir -- "${NEW_DIRS[i]}" 2>/dev/null; done
+    for d in "${!KEEP_MTIME[@]}"; do touch -h -d "@${KEEP_MTIME[$d]}" "$d" 2>/dev/null; done
+    [[ ${#PAIRS[@]} -eq 0 ]] || echo "install failed: removed the bait files and folders this run created" >&2
+  fi
   for f in "$RULES_FILE:$AUDIT_KEY" "$LEGACY_RULES:$LEGACY_KEY"; do
     k=${f##*:}; f=${f%:*}
     [[ -f $f ]] && rules_is_ours "$f" "$k" || continue
@@ -145,15 +181,13 @@ rearm_on_failure() {
     auditctl -c -R "$f" >/dev/null 2>&1 && echo "install failed: reloaded the previous audit rules from $f" >&2
   done
 }
-trap rearm_on_failure EXIT
+trap on_failure EXIT
 
 step "Creating bait files"
 # Everything new should look old and forgotten: files and folders this run
 # creates get FAKE_DATE, folders that already existed keep their own date, and
 # existing baits (earlier runs, -f files) are left alone. Note: ctime/birth time
 # (stat) can't be faked, only mtime/atime.
-declare -A KEEP_MTIME=()   # existing folders we add files to: restore their mtime
-NEW_DIRS=()                # folders we create: backdate them
 for ((i = 1; i < ${#PAIRS[@]}; i += 2)); do
   d=$(dirname "${PAIRS[i]}"); chain=()
   while [[ ! -d $d ]]; do chain=("$d" "${chain[@]}"); d=$(dirname "$d"); done
@@ -165,6 +199,7 @@ for ((i = 1; i < ${#PAIRS[@]}; i += 2)); do
 done
 if [[ ${#PAIRS[@]} -gt 0 ]]; then
   python3 -I "$HERE/render-bait.py" "$TARGET_USER" "$HOST_SHORT" "${PAIRS[@]}"
+  RENDERED=yes
 fi
 for ((i = 1; i < ${#PAIRS[@]}; i += 2)); do
   chown -h "$TARGET_USER:$TARGET_GROUP" "${PAIRS[i]}"
@@ -175,7 +210,8 @@ for b in "${BAITS[@]}"; do [[ -e $b ]] || die "bait $b missing"; done
 for d in "${!KEEP_MTIME[@]}"; do touch -h -d "@${KEEP_MTIME[$d]}" "$d"; done
 for d in "${NEW_DIRS[@]}"; do touch -h -d "$FAKE_DATE" "$d"; done
 ls -la "${BAITS[@]}"
-for b in $PREV_BAITS; do
+read -ra prev <<<"$PREV_BAITS"
+for b in "${prev[@]}"; do
   [[ " ${BAITS[*]} " == *" $b "* || ! -e $b ]] || echo "note: $b is no longer watched (delete it if unneeded)"
 done
 
@@ -212,6 +248,7 @@ for k in "${NAME_KEYS[@]}"; do conf_set "$CONF_PATH" "$k" "${!k}"; done
 conf_set "$CONF_PATH" BAIT_FILE "${BAITS[*]}"
 conf_set "$CONF_PATH" BAIT_CREATED "${CREATED[*]}"
 chmod 600 "$CONF_PATH"
+COMMITTED=yes   # the new baits are on record: a later failure keeps them
 
 step "Installing service -> $UNIT_FILE"
 cat >"$UNIT_FILE" <<EOF
@@ -230,15 +267,7 @@ WantedBy=multi-user.target
 EOF
 
 step "Loading audit rules -> $RULES_FILE"
-# Not `-p r`: its read class includes getxattr/listxattr, which `ls -l` calls on
-# every file. Instead watch the open syscalls themselves (names vary per arch).
-declare -A SC=()
-for arch in b64 b32; do
-  SC[$arch]=""
-  for s in open openat openat2 open_by_handle_at; do
-    ausyscall "$arch" "$s" --exact >/dev/null 2>&1 && SC[$arch]+=" -S $s"
-  done
-done
+# Per bait: a write/attribute watch, plus the open syscalls probed above (SC)
 {
   for b in "${BAITS[@]}"; do
     echo "-w $b -p wa -k $AUDIT_KEY"
@@ -252,6 +281,27 @@ chmod 640 "$RULES_FILE"
 cat "$RULES_FILE"
 augenrules --load >/dev/null 2>&1 || auditctl -c -R "$RULES_FILE" >/dev/null || true
 auditctl -l | grep -- "-k $AUDIT_KEY" || die "audit rule not loaded"
+
+# This is the only moment someone is watching: once the repo is deleted, a
+# trap that never fires goes unnoticed for good. So verify it can fire.
+LOADED=$(auditctl -l 2>/dev/null)
+rules_for() { # loaded rules with our key on exactly this path
+  { grep -F -e "-w $1 " -e "path=$1 " <<<"$LOADED" | grep -E -- "(-k |key=)$AUDIT_KEY\$"; } || true
+}
+for b in "${BAITS[@]}"; do
+  r=$(rules_for "$b")
+  # a watch prints as "-w PATH -p wa -k KEY" (or with path=/perm= fields)
+  grep -qE -- '(-p |perm=)[a-z]*w' <<<"$r" \
+    || die "the write watch for $b didn't load (see: auditctl -l)"
+  grep -qE -- '-S [^ ]*open' <<<"$r" \
+    || die "the open rule for $b didn't load (see: auditctl -l): reading it would go unnoticed"
+done
+[[ $(auditctl -s 2>/dev/null | awk '$1 == "enabled" {print $2}') != 0 ]] \
+  || die "kernel auditing is disabled (auditctl -s: enabled 0, or audit=0 on the kernel command line): no event would ever fire"
+if grep -qxE -- '-a (never,task|task,never)' <<<"$LOADED"; then   # unfiltered = every task
+  die "a 'never,task' audit rule is loaded (often /etc/audit/rules.d/audit.rules): it silences all syscall auditing, so the bait could never fire. Remove it, then re-run"
+fi
+echo "verified: every bait has its open and write rules loaded"
 
 step "Starting service $SERVICE_NAME"
 systemctl daemon-reload

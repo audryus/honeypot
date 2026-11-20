@@ -4,7 +4,7 @@
   render-bait.py USER HOST SRC DST [SRC DST ...]
 
 Every @@TOKEN@@ in SRC is replaced and the result is written to DST (mode 600,
-must not exist yet). Tokens:
+must not exist yet). All or nothing: on any error no DST is left behind. Tokens:
 
   @@KIND@@             random value with the kind's default length (16)
   @@KIND:N@@           N characters (N words for WORDS)
@@ -101,12 +101,27 @@ def main():
             named[name] = gen(kind, n)
         return named[name]
 
+    # All or nothing: render every template first (a bad token aborts before
+    # anything is written), then write; if a write fails, remove what this run
+    # wrote, so a re-run doesn't refuse half-created baits as "real" files.
+    rendered = []
     for src, dst in zip(pairs[::2], pairs[1::2]):
         with open(src, encoding="utf-8") as f:
-            data = TOKEN.sub(sub, f.read())
-        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
+            rendered.append((dst, TOKEN.sub(sub, f.read())))
+    written = []
+    try:
+        for dst, data in rendered:
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            written.append(dst)  # only after O_EXCL succeeded: it's ours
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+    except BaseException:
+        for dst in written:
+            try:
+                os.unlink(dst)
+            except OSError:
+                pass
+        raise
 
 
 if __name__ == "__main__":

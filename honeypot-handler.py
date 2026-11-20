@@ -405,7 +405,8 @@ def notify(cfg, title, body, event=None):
 
 
 # ---------------------------------------------------------------- main handler
-def handle(line):
+def handle(line, state=None):
+    state = {} if state is None else state
     cfg = load_conf()
     ev = parse_audit(line)
     pid = ev.get("pid", "0")
@@ -479,6 +480,7 @@ def handle(line):
              "ip_details": ipd, "actions": actions,
              "processes": procs, "container": container}
     results = notify(cfg, title, body, event)
+    state["notified"] = True
 
     os.makedirs(cfg["REPORT_DIR"], mode=0o700, exist_ok=True)
     rpt = os.path.join(cfg["REPORT_DIR"], f"{datetime.now():%Y%m%d-%H%M%S}-{pid}.log")
@@ -572,10 +574,32 @@ def watch():
 
 
 def _safe_handle(line):
+    """Nobody reads this box's logs (install and forget): if building the full
+    report fails, a short alert must still go out. The journal stays bland
+    (exception type only); the details go to the notification channels."""
+    state = {}
     try:
-        handle(line)
+        handle(line, state)
     except Exception as e:  # noqa: BLE001
-        log(f"ERROR: {e!r}")
+        log(f"request failed ({type(e).__name__})")
+        if state.get("notified"):
+            return
+        try:
+            try:
+                cfg = load_conf()
+            except Exception:  # noqa: BLE001
+                cfg = dict(DEFAULTS)
+            ev = parse_audit(line)
+            body = (f"A bait file was accessed, but building the full report failed: {e!r}\n"
+                    f"Containment may not have run.\n"
+                    f"Process: {ev.get('comm', '?')} [{ev.get('exe', '?')}] pid {ev.get('pid', '?')}"
+                    f" ppid {ev.get('ppid', '?')}\n"
+                    f"User: uid {ev.get('uid', '?')}, login uid {ev.get('auid', '?')},"
+                    f" session {ev.get('ses', '?')}\n"
+                    f"Details: sudo ausearch -k {cfg.get('AUDIT_KEY', '?')} -ts recent -i")
+            notify(cfg, f"Honeypot triggered on {host(cfg)}", body, {"audit": ev, "error": repr(e)})
+        except Exception as e2:  # noqa: BLE001
+            log(f"request failed ({type(e2).__name__})")
 
 
 def main():

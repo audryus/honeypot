@@ -36,14 +36,24 @@ if [[ $PURGE == yes ]]; then
   done
   remove_reports "$REPORT_DIR"
   remove_reports "$LEGACY_REPORTS"
-  for b in $BAIT; do   # space-separated lists
+  # Home folders (canonical): emptied parent folders are removed up to, never including, these
+  HOMES=" $(getent passwd | cut -d: -f6 | while IFS= read -r h; do [[ -n $h ]] && realpath -m -- "$h"; done | tr '\n' ' ') "
+  read -ra BAITS <<<"$BAIT"   # space-separated list (no glob expansion)
+  for b in "${BAITS[@]}"; do
     if [[ " $CREATED " != *" $b "* ]]; then
       [[ -e $b ]] && echo "kept $b (it existed before the install, or the install predates tracking: delete it yourself if it's a bait)"
       continue
     fi
-    rm -f "$b" && echo "deleted bait $b"
+    # We're root in a user's home, maybe months after the install: if a folder
+    # on the way was swapped for a symlink (~/.kube -> /etc/selinux), rm would
+    # delete a system file. Never follow one.
+    if [[ $b != /* ]] || ! no_symlink "$b"; then
+      echo "SKIPPED $b: its path now goes through a symlink (it leads to $(realpath -m -- "$b")). Not following it as root: check and delete it yourself"
+      continue
+    fi
+    rm -f -- "$b" && echo "deleted bait $b"
     d=$(dirname "$b")  # drop folders the decoy created, if now empty (rmdir never removes non-empty ones)
-    while [[ $d != / ]] && rmdir "$d" 2>/dev/null; do d=$(dirname "$d"); done
+    while [[ $d != / && $HOMES != *" $d "* ]] && rmdir -- "$d" 2>/dev/null; do d=$(dirname "$d"); done
   done
   echo "removed (purged config, reports and the bait files the installer created)"
 else

@@ -32,6 +32,10 @@ untouched.
   `kubectl`, `git` (with `credential.helper store`) or Electrum would read the
   file and set off the alarm. For example, use `.kube` on a box that never runs
   kubectl.
+- **Mind your own desktop and IDE.** A file manager guessing a file's type, an
+  IDE opened on `~/projects` or a shell plugin reading `.env` on `cd` opens the
+  bait too (and ends your session). See "How to stop false alarms" in the main
+  README.
 - **Fit the machine.** A NAS with a Bitcoin wallet is odd, but a dev box with a
   `projects/` folder is perfectly normal. Mix two or three decoys that make
   sense together.

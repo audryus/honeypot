@@ -70,6 +70,11 @@ load_names() {
   RULES_FILE="/etc/audit/rules.d/$RULES_NAME.rules"
 }
 
+# True if PATH (absolute, normalised) reaches its target without following a
+# symlink. We run as root inside users' homes: a symlink planted there (e.g.
+# ~/.aws -> /etc) must never make us create, chown or delete a system file.
+no_symlink() { [[ $(realpath -m -- "$1") == "$1" ]]; }
+
 # --- "is this ours?" checks, so we never touch a real system file ----------
 unit_is_ours()    { grep -qxF "ExecStart=$2" "$1" 2>/dev/null; }      # unit handler
 handler_is_ours() { grep -qF "$HANDLER_MARKER" "$1" 2>/dev/null; }

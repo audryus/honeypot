@@ -274,7 +274,7 @@ the installer **stops** and leaves it untouched.
 ### How to install
 
 ```bash
-sudo ./install.sh [-u user] [-e decoy]... [-f file] [-d date]
+sudo ./install.sh [-u user] [-e decoy]... [-f file]... [-d date]
 ```
 
 > **Stealth:** `sudo` logs the full command line, decoy names included, where
@@ -301,20 +301,24 @@ The installer:
 3. Creates the decoy files with random secrets, owned by the user, mode 600.
    Every file **and folder it creates** (e.g. a new `~/.aws/`) gets the same
    fake old date. Folders that already existed, such as `~/.ssh` or your home,
-   keep their original date, so nothing looks freshly touched. It refuses to
-   work through a symlink inside the home folder.
+   keep their original date, so nothing looks freshly touched. It refuses any
+   bait path that goes through a symlink (also for `-f`).
 4. Installs the handler (root-only, mode 700), the config, the systemd unit and
    the audit rules.
-5. Starts the service and sends a test notification.
-6. Prints a summary with your service name, config path, report folder and ban
+5. **Verifies the trap can fire**: every bait has its open and write rules
+   loaded, kernel auditing is enabled, and no `-a never,task` rule silences
+   it. If not, it stops with an error instead of leaving a dead trap behind.
+6. Starts the service and sends a test notification.
+7. Prints a summary with your service name, config path, report folder and ban
    commands. **Save that summary**, then **delete the repository from the
    machine**.
 
 It's **idempotent**: running it again with the same options changes nothing
 important. Existing bait files keep their content and their dates (`-d` only
 applies to what a run creates), and your installed config keeps its settings.
-If an install fails halfway, the previous audit rules are reloaded so the old
-setup keeps watching.
+If an install fails halfway, the bait files and folders that run created are
+removed again (so a re-run doesn't refuse them as real files) and the previous
+audit rules are reloaded so the old setup keeps watching.
 
 ### How to test it without locking yourself out
 
@@ -403,6 +407,22 @@ sudo <HANDLER_PATH> --unban 203.0.113.7     # lift one ban
 Some legitimate programs open every file in a home folder: backup tools
 (restic, borg, rsync, Déjà Dup), desktop indexers (baloo, tracker), antivirus.
 
+**On a machine with a desktop or that you develop on, your own tools can trip
+it, and the default containment then ends your own session** (graphical
+included). Watch out for:
+
+- **File managers** (Nautilus, Dolphin, Thunar...) that read a file to guess
+  its type when the name has no telling extension (`credentials`, `config`,
+  `.env`, `default_wallet`), or to draw a preview. Just opening `~/.aws` in one
+  can be enough.
+- **Editors and IDEs** opened on a folder containing a bait (VS Code on
+  `~/projects`, search-in-files, git integrations).
+- **Shell plugins** that read files on `cd`, e.g. oh-my-zsh `dotenv` (reads
+  `.env`), or tools like `mise`/`direnv` configured to load `.env`.
+
+Prefer decoys in folders you never browse, test with `KILL_SESSION=no` and
+`BAN_IP=no` for a few days of normal use, then turn containment on.
+
 1. Find the program in the report's `Process:` line (the path in brackets):
    ```
    Process:  restic [/usr/bin/restic] pid 9123 ppid 1
@@ -490,12 +510,17 @@ changed there into your new config, then delete it.
 
 ### How to watch a file of your own
 
-`-f` watches any path, absolute or relative to the user's home:
+`-f` watches any path, absolute or relative to the user's home (repeatable):
 
 ```bash
 sudo ./install.sh -f Documents/vault-recovery-codes.txt
-sudo ./install.sh -e .aws -f /srv/backups/.db-root-password
+sudo ./install.sh -e .aws -f /srv/backups/.db-root-password -f notes/root.txt
 ```
+
+- Paths that go through a symlink are refused (the installer runs as root in
+  the user's home and must not be tricked into creating a file elsewhere). If
+  the symlink is legitimate (e.g. `/home` -> `/var/home`), the error shows the
+  real path: pass that instead.
 
 - If the file **doesn't exist**, it's created from the `password.txt` template.
 - If it **exists**, it's watched as it is: content and dates aren't touched,
@@ -621,7 +646,10 @@ sudo ./uninstall.sh --purge    # ...and also the config, the reports and the bai
   deleted.)
 - With `--purge`, folders created by decoys are removed if they end up empty
   (e.g. `~/.kube`). Your real folders such as `~/.ssh` are never removed while
-  they still contain your files.
+  they still contain your files, and a home folder is never removed.
+- A bait whose path now goes through a symlink (e.g. someone replaced `~/.kube`
+  with a link to `/etc`) is **skipped** and reported, never followed: delete
+  it yourself after checking.
 - It also cleans up installs from older versions.
 - Active bans disappear with the firewall table.
 
@@ -680,7 +708,7 @@ How to read it:
 |---|---|---|
 | `-u user` | the user running `sudo` | Owner of the bait files (whose home they go into) |
 | `-e decoy` | `password.txt` when no `-e`/`-f` | Decoy from `examples/`; repeatable |
-| `-f file` | none | Extra file to watch (absolute or relative to home); created from the `password.txt` template if missing |
+| `-f file` | none | Extra file to watch (absolute or relative to home); repeatable; created from the `password.txt` template if missing; refused if its path goes through a symlink |
 | `-d date` | `97 days ago` | Fake modification date for the files and folders this run creates, anything `date -d` accepts (`"2025-03-14"`, `"8 months ago"`) |
 | `-h` | | Show usage |
 
@@ -758,7 +786,8 @@ comments, quotes optional.
 **Hidden or disguised:**
 
 - No installed file, unit, process, firewall table, audit key or journal line
-  contains "honeypot".
+  is *named* "honeypot". (The handler and installed config do contain the word,
+  but only root can read them.)
 - The handler is root-only (mode 700): other users can see that it exists, but
   can't read it.
 - The config path is built into the handler, so `ps` shows no `--config` flag.
@@ -828,7 +857,12 @@ Docker containers), then kills that IP's open sockets with `ss -K`.
   You still get the alert if they open a bait first, which is the usual
   sequence.
 - **The audit log must be at `AUDIT_LOG`** (default
-  `/var/log/audit/audit.log`) and auditd must be running.
+  `/var/log/audit/audit.log`) and auditd must be running. `AUDIT_LOG` is read
+  when the service starts: restart it after changing that one key.
+- **io_uring opens are not caught.** A file opened through io_uring
+  (`IORING_OP_OPENAT`) bypasses syscall audit rules. Everyday tools (`cat`,
+  `cp`, editors, scripts, `scp`, `tar`) use the normal syscalls and are caught;
+  a deliberate, tailored evasion might not be.
 - **One alert per session per `DEBOUNCE_SECONDS`**, so a burst of reads gives
   one alert.
 - **Events that happen while the service is down are never alerted** (it
@@ -838,7 +872,7 @@ Docker containers), then kills that IP's open sockets with `ss -K`.
   certificates and seed phrase don't validate, and the cloud keys don't work.
   That's fine because the alert fires on the *open*, before anyone can check,
   but the intruder will know afterwards.
-- **Bait paths can't contain spaces.**
+- **Bait paths can't contain spaces or `* ? [`.**
 - **It's a tripwire, not a full IDS.** Use it alongside updates, key-only SSH,
   fail2ban/CrowdSec and backups.
 

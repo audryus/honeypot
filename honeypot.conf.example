@@ -125,7 +125,9 @@ HOST_LABEL=
 #   If there is no login session (web shell, cron, container), only the process
 #   that touched the bait and its parent shell are killed, never anything higher
 #   up (that could be a real service).
-#   no  = monitor only: alert, but let them continue (good for testing).
+#   no  = don't kill anything. NOT monitor-only by itself: with BAN_IP=yes the
+#         source IP is still banned and its connections cut (which drops an
+#         SSH session anyway). For a pure monitor-only test set both to no.
 KILL_SESSION=yes
 
 # yes = drop ALL traffic from the source IP (SSH, web UIs, databases...) and cut
@@ -180,6 +182,15 @@ DEBOUNCE_SECONDS=30
 # yes = look up city / country / ISP of PUBLIC source IPs via ipinfo.io
 #   (LAN addresses are never sent). no = never contact ipinfo.io.
 IP_LOOKUP=yes
+
+
+# -----------------------------------------------------------------------------
+#  AUDIT LOG
+# -----------------------------------------------------------------------------
+# The auditd log the handler follows. Only change it if auditd.conf's log_file
+#   points elsewhere. Unlike the other settings it is read once at start:
+#   restart the service after changing it (systemctl restart <SERVICE_NAME>).
+AUDIT_LOG=/var/log/audit/audit.log
 
 
 # -----------------------------------------------------------------------------
