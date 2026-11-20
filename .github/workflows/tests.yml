@@ -1,5 +1,8 @@
 name: tests
 
+# Stage 1 (fast, in parallel): unit tests and lint, no root, nothing installed.
+# Later stages run only if every stage 1 job passes.
+
 on:
   push:
   pull_request:
@@ -16,14 +19,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Oldest first: the handler runs on whatever python3 the server ships
+        # The handler runs on whatever python3 the server ships
         # (Ubuntu 20.04: 3.8, Debian 11: 3.9, Debian 12: 3.11, Ubuntu 24.04: 3.12)
         include:
           - { python: "3.8", os: ubuntu-22.04 }
-          - { python: "3.9", os: ubuntu-latest }
-          - { python: "3.11", os: ubuntu-latest }
-          - { python: "3.12", os: ubuntu-latest }
-          - { python: "3.13", os: ubuntu-latest }
+          - { python: "3.9", os: ubuntu-22.04 }
+          - { python: "3.11", os: ubuntu-24.04 }
+          - { python: "3.12", os: ubuntu-24.04 }
+          - { python: "3.13", os: ubuntu-24.04 }
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
@@ -36,3 +39,17 @@ jobs:
       - name: Unit tests
         # Safe on any machine: every command, kill and network call is faked
         run: python -m unittest discover -s tests -v
+
+  shell-lint:
+    name: shell lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: bash -n install.sh uninstall.sh common.sh
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null || sudo apt-get install -y -qq shellcheck
+          shellcheck --version | head -2
+          shellcheck -x -S warning install.sh uninstall.sh common.sh

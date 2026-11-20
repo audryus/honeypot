@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034  # sourced: its variables are used by install.sh / uninstall.sh
 # Shared by install.sh and uninstall.sh (sourced, not executed).
 # Reads the STEALTH names from ./honeypot.conf (or the .example) next to the scripts.
 
