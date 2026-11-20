@@ -79,6 +79,17 @@ diagnostics() {
   echo "--- audit status"; auditctl -s 2>&1
   echo "--- nft"; nft list table inet "$TABLE" 2>&1
   echo "--- reports"; ls -la "$REPORTS" 2>&1; tail -n 40 "$REPORTS"/*.log 2>/dev/null
+  echo "--- auditd.conf"; grep -vE '^\s*(#|$)' /etc/audit/auditd.conf 2>&1
+  echo "--- audit log"; ls -la /var/log/audit 2>&1; tail -n 15 /var/log/audit/audit.log 2>&1
+  echo "--- ausearch key"; ausearch -k "$AKEY" -ts recent 2>&1 | tail -n 20
+  echo "--- probe: watch a temp file, cat it, look for it"
+  local p=/root/hp-probe.txt; echo x >"$p"
+  auditctl -a always,exit -F arch=b64 -S openat -F path="$p" -k hp-probe 2>&1
+  cat "$p" >/dev/null; sleep 2
+  ausearch -k hp-probe -i 2>&1 | tail -n 8; grep -c hp-probe /var/log/audit/audit.log
+  auditctl -D -k hp-probe >/dev/null 2>&1
+  echo "--- kernel"; uname -r; cat /proc/cmdline; dmesg 2>/dev/null | grep -i audit | tail -n 10
+  echo "--- auditd"; systemctl status auditd --no-pager 2>&1 | head -15
   endgroup
 }
 finish() {
