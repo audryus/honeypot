@@ -231,8 +231,7 @@ on_failure() {
     [[ -f $f ]] && rules_is_ours "$f" "$k" || continue
     # always reload, even if some rules are loaded: a partial load (one rule
     # refused) would leave the trap half-armed
-    auditctl -D -k "$k" >/dev/null 2>&1
-    auditctl -c -R "$f" >/dev/null 2>&1 && echo "install failed: reloaded the audit rules from $f" >&2
+    reload_rules "$f" "$k" && echo "install failed: reloaded the audit rules from $f" >&2
   done
   if [[ $WAS_ACTIVE == yes ]]; then
     systemctl daemon-reload; systemctl start "$SERVICE_NAME" && echo "install failed: restarted $SERVICE_NAME" >&2
@@ -394,16 +393,23 @@ load_rules() {
   chmod 640 "$RULES_FILE"
   cat "$RULES_FILE"
   augenrules --load >/dev/null 2>&1 || true
-  # The kernel can refuse a rule added right after the old ones were deleted
-  # (seen on Arch), and augenrules stops at the first refusal: reload ours alone
-  local try
-  for try in 1 2 3; do
-    rules_complete "$(auditctl -l 2>/dev/null)" && break
-    auditctl -D -k "$AUDIT_KEY" >/dev/null 2>&1
-    sleep "$try"
-    auditctl -c -R "$RULES_FILE" >/dev/null || true
-  done
+  # augenrules stops at the first rule the kernel refuses (seen on Arch): reload ours alone
+  rules_complete "$(auditctl -l 2>/dev/null)" || reload_rules "$RULES_FILE" "$AUDIT_KEY" || true
   auditctl -l | grep -- "-k $AUDIT_KEY" || die "audit rule not loaded"
+}
+
+# The kernel can refuse a watch re-added right after it was deleted (its old
+# inotify mark is freed asynchronously): pause after deleting, check, retry.
+reload_rules() { # rules-file key: 0 once every rule of the file with that key is loaded
+  local try want
+  want=$(grep -cE -- "(-k |key=)$2\$" "$1" || true)
+  for try in 1 2 3; do
+    auditctl -D -k "$2" >/dev/null 2>&1
+    sleep "$try"
+    auditctl -c -R "$1" >/dev/null 2>&1
+    (( $(auditctl -l 2>/dev/null | grep -cE -- "(-k |key=)$2\$") >= want )) && return 0
+  done
+  return 1
 }
 
 rules_complete() { # auditctl -l output: does every bait have its write watch and open rule?

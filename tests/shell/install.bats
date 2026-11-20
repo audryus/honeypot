@@ -405,6 +405,7 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   echo "-w /x -p wa -k $AUDIT_KEY" >"$RULES_FILE"
   fake auditctl "[[ \$1 == -l ]] && echo '-w /x -p wa -k $AUDIT_KEY'; true"
   WAS_ACTIVE=yes
+  sleep() { :; }
   ( ( exit 3 ) || on_failure 2>/dev/null )   # subshell: on_failure turns off -e
   grep -qx "auditctl -D -k $AUDIT_KEY" "$T/calls"
   grep -qx "auditctl -c -R $RULES_FILE" "$T/calls"
@@ -428,6 +429,24 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   load_rules >/dev/null
   grep -qx "auditctl -D -k $AUDIT_KEY" "$T/calls"
   [ "$(grep -c -- "-R $RULES_FILE" "$T/calls")" -eq 1 ]
+}
+
+@test "reload_rules: retries until every rule of the file is loaded" {
+  printf -- '-w /x -p wa -k k1\n-a always,exit -S openat -F path=/x -k k1\n' >"$RULES_FILE"
+  # the watch only "loads" on the second -R
+  fake auditctl "if [[ \$1 == -l ]]; then n=\$(grep -c -- '-R' '$T/calls'); cat '$RULES_FILE' | head -n \$n; fi; true"
+  sleep() { :; }
+  reload_rules "$RULES_FILE" k1
+  [ "$(grep -c -- "-R $RULES_FILE" "$T/calls")" -eq 2 ]
+  [ "$(grep -c -- "-D -k k1" "$T/calls")" -eq 2 ]
+}
+
+@test "reload_rules: gives up after 3 tries" {
+  echo '-w /x -p wa -k k1' >"$RULES_FILE"
+  sleep() { :; }
+  run reload_rules "$RULES_FILE" k1
+  [ "$status" -eq 1 ]
+  [ "$(grep -c -- "-R $RULES_FILE" "$T/calls")" -eq 3 ]
 }
 
 @test "load_rules: a complete load isn't touched" {
