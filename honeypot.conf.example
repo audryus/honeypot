@@ -185,6 +185,29 @@ IP_LOOKUP=yes
 
 
 # -----------------------------------------------------------------------------
+#  LIVENESS (you'll install this and forget it: it has to speak up by itself)
+# -----------------------------------------------------------------------------
+# Every 15 minutes the handler checks the trap can still fire: bait files
+#   exist, their audit rules are loaded, auditd runs, kernel auditing is on.
+#   If not, you get a "PROBLEM" alert right away (and "recovered" when fixed).
+#   Check by hand any time:  sudo <HANDLER_PATH> --health
+
+# Send a low-priority "still watching" message every N days, with the check
+#   results and the number of alerts since the last one. If it stops coming,
+#   the box, the service or your notification channel is broken.
+#   0 = off. Fractions work (0.5 = every 12h). An invalid value falls back to 7.
+HEARTBEAT_DAYS=7
+
+# Optional dead-man's switch: a URL fetched every 15 minutes while all checks
+#   pass. A monitoring service alerts YOU when the pings stop, which also
+#   covers the cases where this machine can't tell you anything (powered off,
+#   network down, notification token revoked). Free options: healthchecks.io
+#   (set period 15 min, grace 30 min), a self-hosted Uptime Kuma "Push" monitor.
+#   Example: HEARTBEAT_URL=https://hc-ping.com/3f9c1a7e-5b2d-48c0-a6e1-f4b9d7c2e8a1
+HEARTBEAT_URL=
+
+
+# -----------------------------------------------------------------------------
 #  AUDIT LOG
 # -----------------------------------------------------------------------------
 # The auditd log the handler follows. Only change it if auditd.conf's log_file

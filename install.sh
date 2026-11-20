@@ -147,19 +147,17 @@ for arch in b64 b32; do
 done
 [[ -n ${SC[b64]}${SC[b32]} ]] || die "ausyscall can't resolve the open syscalls: reads of the bait would go unnoticed"
 
-# Re-runs: unload the old rules first so preparing the bait doesn't trigger an alert
-auditctl -D -k "$AUDIT_KEY" >/dev/null 2>&1 || true
-auditctl -D -k "$LEGACY_KEY" >/dev/null 2>&1 || true
-# From here on the trap is disarmed. If anything below fails:
+# From the next step on the trap is disarmed. If anything below fails:
 #  - before the config records the new baits: delete the files and folders
 #    this run created (else a re-run refuses them as "real" files, and a
 #    leftover folder would keep today's date and look freshly made);
 #  - always: reload whatever rules file is on disk so the previous install
-#    keeps watching.
+#    keeps watching, and restart the service if we stopped it.
 declare -A KEEP_MTIME=()   # existing folders we add files to: restore their mtime
 NEW_DIRS=()                # folders we create: backdate them
 RENDERED=no                # render-bait.py wrote every file in PAIRS
 COMMITTED=no               # the installed config lists the new baits
+WAS_ACTIVE=no              # we stopped a running service
 on_failure() {
   local rc=$? f k i
   [[ $rc -ne 0 ]] || return 0
@@ -180,8 +178,20 @@ on_failure() {
     auditctl -l 2>/dev/null | grep -q -- "-k $k\$" && continue
     auditctl -c -R "$f" >/dev/null 2>&1 && echo "install failed: reloaded the previous audit rules from $f" >&2
   done
+  if [[ $WAS_ACTIVE == yes ]]; then
+    systemctl daemon-reload; systemctl start "$SERVICE_NAME" && echo "install failed: restarted $SERVICE_NAME" >&2
+  fi
 }
 trap on_failure EXIT
+
+# Re-runs: stop the running service first (its health checks would report the
+# brief disarm below, and the end-to-end test opens every bait), then unload
+# the old rules so preparing the baits doesn't trigger an alert.
+if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+  systemctl stop "$SERVICE_NAME"; WAS_ACTIVE=yes
+fi
+auditctl -D -k "$AUDIT_KEY" >/dev/null 2>&1 || true
+auditctl -D -k "$LEGACY_KEY" >/dev/null 2>&1 || true
 
 step "Creating bait files"
 # Everything new should look old and forgotten: files and folders this run
@@ -303,12 +313,47 @@ if grep -qxE -- '-a (never,task|task,never)' <<<"$LOADED"; then   # unfiltered =
 fi
 echo "verified: every bait has its open and write rules loaded"
 
+step "End-to-end test: opening each bait once (service stopped: nothing is contained)"
+# Proves the whole chain the handler relies on: the kernel logs an open of each
+# bait, auditd writes it, and AUDIT_LOG (what the handler follows) holds the
+# exact line it filters for (type=SYSCALL + key="<AUDIT_KEY>"). The service is
+# started only afterwards and reads from the log's end, so these test events
+# never raise an alert.
+AUDIT_LOG=$(conf_get "$CONF_PATH" AUDIT_LOG /var/log/audit/audit.log)
+[[ -f $AUDIT_LOG ]] || die "AUDIT_LOG=$AUDIT_LOG doesn't exist: set it in $CONF_PATH to auditd.conf's log_file"
+E2E_PID=$(python3 -I - "${BAITS[@]}" <<'PY'
+import os, sys
+for b in sys.argv[1:]:
+    try:  # O_NOATIME (allowed for root): the bait's access time stays as it was
+        fd = os.open(b, os.O_RDONLY | os.O_NOATIME)
+    except PermissionError:  # some filesystems (NFS) refuse the flag
+        fd = os.open(b, os.O_RDONLY)
+    os.close(fd)
+print(os.getpid())
+PY
+) || die "end-to-end test: could not open the bait files"
+missing=("${BAITS[@]}")
+for _ in $(seq 20); do   # auditd writes asynchronously: give it up to ~10s
+  seen=$(ausearch -k "$AUDIT_KEY" -p "$E2E_PID" -ts recent -i 2>/dev/null | grep '^type=PATH' || true)
+  missing=()
+  for b in "${BAITS[@]}"; do
+    grep -qF -e "name=$b " -e "name=\"$b\" " <<<"$seen" || missing+=("$b")
+  done
+  [[ ${#missing[@]} -eq 0 ]] && break
+  sleep 0.5
+done
+[[ ${#missing[@]} -eq 0 ]] || die "end-to-end test: opening these baits was NOT logged by auditd: ${missing[*]} (the rules look loaded; check auditd: systemctl status auditd, auditctl -s)"
+n=$(tail -n 100000 "$AUDIT_LOG" | grep -F 'type=SYSCALL' | grep -F " pid=$E2E_PID " | grep -cF "key=\"$AUDIT_KEY\"" || true)
+[[ $n -ge ${#BAITS[@]} ]] || die "end-to-end test: auditd logged the opens, but not into AUDIT_LOG=$AUDIT_LOG, which the handler follows. Set AUDIT_LOG in $CONF_PATH to auditd.conf's log_file"
+echo "ok: all ${#BAITS[@]} bait open(s) reached $AUDIT_LOG as the handler expects"
+
 step "Starting service $SERVICE_NAME"
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
 systemctl restart "$SERVICE_NAME"
 sleep 1
 systemctl is-active "$SERVICE_NAME"
+"$HANDLER_PATH" --health || die "the handler's own health check fails (see above)"
 
 step "Test notification"
 "$HANDLER_PATH" --test || echo "(configure a channel in $CONF_PATH, then: sudo $HANDLER_PATH --test)"
@@ -323,4 +368,7 @@ Now delete this repository copy from the machine: it gives the trap away.
   config:  $CONF_PATH (no restart needed)
   reports: $REPORT_DIR/
   bans:    sudo $HANDLER_PATH --bans     unban: sudo $HANDLER_PATH --unban <ip>
+  health:  sudo $HANDLER_PATH --health   (also checked every 15 min: you get an alert if the trap goes blind)
+  heartbeat: a "still watching" message every $(conf_get "$CONF_PATH" HEARTBEAT_DAYS 7) day(s) (HEARTBEAT_DAYS, 0 = off);
+           no heartbeat = something is wrong. HEARTBEAT_URL adds an outside dead-man's switch.
 EOF

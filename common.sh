@@ -97,5 +97,6 @@ remove_install() { # unit handler rules key table
 remove_reports() {
   [[ -d $1 ]] || return 0
   find "$1" -maxdepth 1 -type f -name '[0-9]*-[0-9]*.log' -delete
+  rm -f -- "$1/state" "$1/state.tmp"   # the handler's heartbeat state (STATE_FILE)
   rmdir "$1" 2>/dev/null || true
 }

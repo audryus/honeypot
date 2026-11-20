@@ -15,6 +15,7 @@ details go to the report files only.
 CLI (installed under whatever HANDLER_PATH is set to):
   <handler>              run the watcher (what systemd does)
   <handler> --test       send a test notification
+  <handler> --health     check the trap can fire (rules loaded, auditd up...)
   <handler> --bans       list currently banned IPs
   <handler> --unban IP   remove an IP from the ban list
 """
@@ -63,8 +64,13 @@ DEFAULTS = {
     "TELEGRAM_CHAT_ID": "",
     "DISCORD_WEBHOOK": "",
     "WEBHOOK_URL": "",           # generic JSON POST
+    # liveness (install and forget: say so when the trap can't fire any more)
+    "HEARTBEAT_DAYS": "7",       # "still watching" message every N days (0 = off)
+    "HEARTBEAT_URL": "",         # dead-man's switch pinged while healthy
 }
-
+HEALTH_EVERY = 900               # seconds between health checks / pings
+STATE_FILE = "state"             # in REPORT_DIR: when the last heartbeat went out
+REPORT_RE = re.compile(r"^\d{8}-\d{6}-\d+\.log$")
 
 
 def host(cfg):
@@ -72,6 +78,7 @@ def host(cfg):
 
 _last_seen = {}
 _lock = threading.Lock()
+_tick = [time.time()]            # last turn of the audit log loop (stuck watcher check)
 
 
 # ---------------------------------------------------------------- helpers
@@ -369,7 +376,7 @@ def http(url, data, headers, timeout=8):
         return r.status
 
 
-def notify(cfg, title, body, event=None):
+def notify(cfg, title, body, event=None, priority="urgent", tags="rotating_light,skull"):
     results = []
 
     def attempt(name, fn):
@@ -380,8 +387,8 @@ def notify(cfg, title, body, event=None):
             results.append(f"{name}: FAILED {e}")
 
     if cfg["NTFY_URL"]:
-        h = {"Title": title.encode("ascii", "ignore").decode(), "Priority": "urgent",
-             "Tags": "rotating_light,skull"}
+        h = {"Title": title.encode("ascii", "ignore").decode(), "Priority": priority,
+             "Tags": tags}
         if cfg["NTFY_TOKEN"]:
             h["Authorization"] = f"Bearer {cfg['NTFY_TOKEN']}"
         attempt("ntfy", lambda: http(cfg["NTFY_URL"], body.encode(), h))
@@ -402,6 +409,121 @@ def notify(cfg, title, body, event=None):
     if not results:
         results.append("no notification channel configured")
     return results
+
+
+# ---------------------------------------------------------------- liveness
+def health(cfg, check_watcher=False):
+    """Problems that would keep the trap from ever firing. Never opens a bait
+    (stat/lexists don't trigger the audit rules)."""
+    problems = []
+    baits = cfg["BAIT_FILE"].split()
+    if not baits:
+        problems.append("no bait files configured (BAIT_FILE is empty)")
+    for b in baits:
+        if not os.path.lexists(b):
+            problems.append(f"bait file is gone: {b}")
+    rc, out, err = run(["auditctl", "-s"])
+    st = dict(l.split(None, 1) for l in out.splitlines() if " " in l)
+    if rc != 0:
+        problems.append(f"auditctl -s failed: {err or rc}")
+    else:
+        if st.get("enabled") == "0":
+            problems.append("kernel auditing is disabled (auditctl -s: enabled 0)")
+        if st.get("pid", "0") == "0":
+            problems.append("auditd is not running: nothing reaches the audit log")
+    rc, out, err = run(["auditctl", "-l"])
+    if rc != 0:
+        problems.append(f"auditctl -l failed: {err or rc}")
+    else:
+        key = re.compile(r"(-k |key=)" + re.escape(cfg["AUDIT_KEY"]) + r"$")
+        mine = [l for l in out.splitlines() if key.search(l)]
+        for b in baits:
+            rules = [l for l in mine if f"-w {b} " in l or f"path={b} " in l]
+            if not any(re.search(r"-S \S*open", l) for l in rules):
+                problems.append(f"audit rule for opening {b} is not loaded")
+            if not any(re.search(r"(-p |perm=)[a-z]*w", l) for l in rules):
+                problems.append(f"audit watch for writing {b} is not loaded")
+    if not os.path.exists(cfg["AUDIT_LOG"]):
+        problems.append(f"audit log {cfg['AUDIT_LOG']} does not exist (AUDIT_LOG)")
+    if check_watcher and time.time() - _tick[0] > 300:
+        problems.append("the audit log watcher is stuck")
+    return problems
+
+
+def read_state(cfg):
+    try:
+        with open(os.path.join(cfg["REPORT_DIR"], STATE_FILE)) as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def write_state(cfg, st):
+    os.makedirs(cfg["REPORT_DIR"], mode=0o700, exist_ok=True)
+    path = os.path.join(cfg["REPORT_DIR"], STATE_FILE)
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(st, f)
+    os.replace(path + ".tmp", path)
+
+
+def reports_since(cfg, since):
+    try:
+        with os.scandir(cfg["REPORT_DIR"]) as it:
+            return sum(1 for e in it if REPORT_RE.match(e.name) and e.stat().st_mtime > since)
+    except OSError:
+        return 0
+
+
+def liveness_loop():
+    """Install and forget: nobody looks at this box, so it must speak up by
+    itself. Immediate alert when the trap goes blind (and when it recovers),
+    a periodic "still watching" message, and a dead-man's-switch ping that an
+    outside service turns into an alert if it stops (box down, channel broken)."""
+    time.sleep(120)  # let auditd settle after a boot
+    reported = set()
+    while True:
+        try:
+            cfg = load_conf()
+            problems = health(cfg, check_watcher=True)
+            if problems:  # transient? (auditd restart, package upgrade): look again
+                time.sleep(60)
+                cfg = load_conf()
+                problems = health(cfg, check_watcher=True)
+            if set(problems) - reported:
+                notify(cfg, f"Honeypot PROBLEM on {host(cfg)}",
+                       "The tripwire may be blind:\n- " + "\n- ".join(problems)
+                       + "\n\nOn the machine: sudo <handler> --health", tags="warning")
+            elif reported and not problems:
+                notify(cfg, f"Honeypot recovered on {host(cfg)}", "All checks pass again.",
+                       priority="default", tags="white_check_mark")
+            reported = set(problems)
+
+            if not problems and cfg["HEARTBEAT_URL"]:
+                try:
+                    urllib.request.urlopen(cfg["HEARTBEAT_URL"], timeout=10).close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            days = seconds(cfg, "HEARTBEAT_DAYS")
+            st, now = read_state(cfg), time.time()
+            if days > 0 and "heartbeat" not in st:
+                st["heartbeat"] = now  # first start: the install's test message was the first
+                write_state(cfg, st)
+            elif days > 0 and now - st["heartbeat"] >= days * 86400:
+                body = (f"Still watching on {host(cfg)}.\n"
+                        f"Bait files: {len(cfg['BAIT_FILE'].split())}\n"
+                        f"Checks:     {'all OK' if not problems else 'PROBLEMS: ' + '; '.join(problems)}\n"
+                        f"Alerts since the last heartbeat: {reports_since(cfg, st['heartbeat'])}\n"
+                        f"Next heartbeat in {days:g} day(s).")
+                r = notify(cfg, f"Honeypot heartbeat from {host(cfg)}", body,
+                           priority="low", tags="green_heart")
+                if any(": ok" in x for x in r):  # else retry at the next check
+                    st["heartbeat"] = now
+                    write_state(cfg, st)
+        except Exception as e:  # noqa: BLE001
+            log(f"check failed ({type(e).__name__})")
+        time.sleep(HEALTH_EVERY)
 
 
 # ---------------------------------------------------------------- main handler
@@ -536,6 +658,7 @@ def follow(path):
     # opaque cookie, which could fake a "truncated" log and replay old events).
     f, ino, buf, first = None, None, b"", True
     while True:
+        _tick[0] = time.time()
         if f is None:
             try:
                 f = open(path, "rb")
@@ -567,6 +690,7 @@ def watch():
     cfg = load_conf()
     ensure_nft(cfg)
     needle = f'key="{cfg["AUDIT_KEY"]}"'
+    threading.Thread(target=liveness_loop, daemon=True).start()
     log("agent started")
     for line in follow(cfg["AUDIT_LOG"]):
         if "type=SYSCALL" in line and needle in line:
@@ -612,6 +736,10 @@ def main():
                    f"Test notification. Bait file: {cfg['BAIT_FILE'] or '?'}\nIf you got this, alerts work.")
         print("\n".join(r))
         sys.exit(0 if all(": ok" in x for x in r) else 1)
+    elif a[0] == "--health":
+        problems = health(load_conf())
+        print("\n".join(problems) if problems else "ok: every check passes")
+        sys.exit(1 if problems else 0)
     elif a[0] == "--bans":
         cfg = load_conf()
         for s in ("banned4", "banned6"):

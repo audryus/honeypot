@@ -35,6 +35,7 @@ detection is in-kernel and can't be skipped by tools that avoid `cat`.
   - [Test it without locking yourself out](#how-to-test-it-without-locking-yourself-out)
   - [Avoid locking yourself out for real](#how-to-avoid-locking-yourself-out-for-real)
   - [Read alerts, reports and logs](#how-to-read-alerts-reports-and-logs)
+  - [Know it's still working (heartbeat, health checks)](#how-to-know-its-still-working)
   - [Manage IP bans](#how-to-manage-ip-bans)
   - [Stop false alarms (backups, indexers)](#how-to-stop-false-alarms)
   - [Change settings after installing](#how-to-change-settings-after-installing)
@@ -308,8 +309,13 @@ The installer:
 5. **Verifies the trap can fire**: every bait has its open and write rules
    loaded, kernel auditing is enabled, and no `-a never,task` rule silences
    it. If not, it stops with an error instead of leaving a dead trap behind.
-6. Starts the service and sends a test notification.
-7. Prints a summary with your service name, config path, report folder and ban
+6. **End-to-end test**: with the service stopped (so nothing gets contained),
+   it opens each bait once as root, without changing its access time, and
+   checks that auditd logged every open and that `AUDIT_LOG` holds the exact
+   line the handler reacts to. These test events never raise an alert: the
+   service starts afterwards and only reads new events.
+7. Starts the service, runs its health check and sends a test notification.
+8. Prints a summary with your service name, config path, report folder and ban
    commands. **Save that summary**, then **delete the repository from the
    machine**.
 
@@ -386,6 +392,30 @@ sudo ausearch -k <AUDIT_KEY> -i | less    # raw kernel audit events for the bait
 
 The journal is deliberately vague (no "intrusion" wording, no bait paths),
 because admin users who can read it might be the intruder.
+
+### How to know it's still working
+
+You'll install this and forget about it, so it speaks up by itself:
+
+| What | When | Setting |
+|---|---|---|
+| **PROBLEM alert** listing what's broken (bait deleted, audit rules gone, auditd stopped, auditing disabled, watcher stuck) | Within ~15 minutes of it breaking; a "recovered" message when fixed | always on |
+| **Heartbeat**: a low-priority "still watching" message with the check results and the number of alerts since the last one | Every `HEARTBEAT_DAYS` days (default 7) | `HEARTBEAT_DAYS=0` turns it off |
+| **Dead-man's switch**: a URL fetched every 15 minutes while all checks pass | An outside service alerts you when the pings stop | `HEARTBEAT_URL` (healthchecks.io, Uptime Kuma push) |
+
+**No heartbeat for longer than `HEARTBEAT_DAYS` means something is wrong**:
+the machine, the service or your notification channel (an expired token
+fails silently otherwise). The dead-man's switch is the only one that also
+works when the machine is off or offline, so set it up if you can.
+
+Check by hand at any time:
+
+```bash
+sudo <HANDLER_PATH> --health     # "ok: every check passes", or the list of problems (exit code 1)
+```
+
+A rule deleted by a root intruder (`auditctl -D`) also shows up as a PROBLEM
+alert, unless they stop the service first.
 
 ### How to manage IP bans
 
@@ -730,6 +760,7 @@ Run as root, using your `HANDLER_PATH`:
 |---|---|
 | `<HANDLER_PATH>` | Run the watcher (this is what systemd runs) |
 | `<HANDLER_PATH> --test` | Send a test notification on every channel; exit code 0 only if all succeed |
+| `<HANDLER_PATH> --health` | Check the trap can fire (baits exist, rules loaded, auditd up, auditing on); exit code 1 on any problem |
 | `<HANDLER_PATH> --bans` | List banned IPv4/IPv6 addresses |
 | `<HANDLER_PATH> --unban IP` | Remove an IP from the ban list |
 
@@ -765,6 +796,8 @@ comments, quotes optional.
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | *(empty)* | runtime | Telegram channel |
 | `DISCORD_WEBHOOK` | *(empty)* | runtime | Discord channel |
 | `WEBHOOK_URL` | *(empty)* | runtime | generic JSON POST |
+| `HEARTBEAT_DAYS` | `7` | runtime | "still watching" message every N days (`0` = off; invalid → `7`) |
+| `HEARTBEAT_URL` | *(empty)* | runtime | dead-man's-switch URL fetched every 15 min while healthy |
 | `AUDIT_LOG` | `/var/log/audit/audit.log` | runtime | audit log to follow (only if your distro logs elsewhere) |
 
 ### What gets installed where
@@ -775,7 +808,7 @@ comments, quotes optional.
 | Config | `CONF_PATH` → `/etc/polkit-1/agent-helper.conf` | 600 root |
 | systemd unit | `/etc/systemd/system/<SERVICE_NAME>.service` | 644 |
 | Audit rules | `/etc/audit/rules.d/<RULES_NAME>.rules` | 640 |
-| Reports | `REPORT_DIR/*.log` | 700 dir / 600 files |
+| Reports | `REPORT_DIR/*.log` (+ `REPORT_DIR/state`: when the last heartbeat went out) | 700 dir / 600 files |
 | Firewall | nft table `inet <NFT_TABLE>` with sets `banned4`, `banned6` | in memory |
 | Bait files | user's home (per decoy) | 600, owned by the user |
 
@@ -807,6 +840,7 @@ comments, quotes optional.
 | **sudo log** (`COMMAND=/…/install.sh -e .aws` in the journal / `auth.log`) | adm / wheel users | Same: from a root shell, sudo only logs the shell |
 | Package manager log shows `audit`/`nftables` being installed (`/var/log/apt/history.log`, `pacman.log`, `dnf.log`) | often everyone | Usually harmless; install them some days earlier if it matters |
 | `ps` shows `python3 <HANDLER_PATH>` | everyone | Pick a path where a Python helper is plausible |
+| With `HEARTBEAT_URL`: an HTTPS connection every 15 minutes (`ss -tn` shows the remote address, not the process) | everyone | Looks like any agent phoning home; leave it empty if that matters more than the dead-man's switch |
 | A bait's *change time* (`stat` → `Change:`) is the install date | everyone | Can't be faked on Linux; only mtime/atime can |
 | `auditctl -l` lists the bait paths | root | An intruder with root owns the box anyway |
 | Installed config comments describe the tool | root | Same as above |
@@ -919,6 +953,15 @@ real file or unit. Choose another name in `honeypot.conf`.
 **`install.sh` says a bait "already exists and looks real"**: you have a real
 file at that path (e.g. your actual `~/.aws/credentials`). Choose a different
 decoy. It refuses on purpose.
+
+**"End-to-end test: … NOT logged by auditd"** or **"… not into AUDIT_LOG"**:
+the rules are loaded but events don't arrive where the handler reads them.
+Check `systemctl status auditd`, `auditctl -s`, and that `AUDIT_LOG` in
+`<CONF_PATH>` matches `log_file` in `/etc/audit/auditd.conf`.
+
+**A PROBLEM alert**: run `sudo <HANDLER_PATH> --health` to see what's still
+broken. Missing rules after an audit config change: re-run `install.sh` with
+the same options (or `sudo augenrules --load`).
 
 **"audit rule not loaded"**: auditd isn't running or rules are locked. Check
 `systemctl status auditd` and `auditctl -s`.
