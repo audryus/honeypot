@@ -1,7 +1,8 @@
 name: tests
 
 # Stage 1 (fast, in parallel): unit tests and lint, no root, nothing installed.
-# Later stages run only if every stage 1 job passes.
+# Stage 2 (heavier, only if every stage 1 job passes): the real install,
+# triggers and uninstall as root on a throwaway runner.
 
 on:
   push:
@@ -65,3 +66,18 @@ jobs:
       - name: Unit tests
         # No root: temp dirs and fake system tools only
         run: bats --print-output-on-failure tests/shell
+
+  integration:
+    name: integration (${{ matrix.os }})
+    needs: [python, shell-lint, shell-unit]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, trigger, contain, ban, health, re-install, uninstall
+        # Root on a disposable VM: installs auditd/sshd, kills sessions, edits nftables
+        run: sudo GITHUB_ACTIONS=true tests/integration/run.sh
