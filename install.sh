@@ -232,7 +232,7 @@ if [[ $CONF_PATH != "$LEGACY_CONF" && -f $LEGACY_CONF && ! -e $CONF_PATH ]]; the
   mv "$LEGACY_CONF" "$CONF_PATH" && echo "moved $LEGACY_CONF -> $CONF_PATH"
 fi
 if [[ $REPORT_DIR != "$LEGACY_REPORTS" && -d $LEGACY_REPORTS ]]; then
-  mkdir -p -m 700 "$REPORT_DIR"
+  install -d -m 700 "$REPORT_DIR"   # parents keep default perms
   find "$LEGACY_REPORTS" -maxdepth 1 -type f -exec mv -t "$REPORT_DIR" {} +
   rmdir "$LEGACY_REPORTS" 2>/dev/null && echo "moved reports $LEGACY_REPORTS -> $REPORT_DIR"
 fi
