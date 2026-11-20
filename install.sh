@@ -406,7 +406,7 @@ reload_rules() { # rules-file key: 0 once every rule of the file with that key i
   for try in 1 2 3; do
     auditctl -D -k "$2" >/dev/null 2>&1
     sleep "$try"
-    auditctl -c -R "$1" >/dev/null 2>&1
+    auditctl -R "$1" >/dev/null 2>&1   # exactly "-R file": auditctl ignores -R with any other option (-c)
     (( $(auditctl -l 2>/dev/null | grep -cE -- "(-k |key=)$2\$") >= want )) && return 0
   done
   return 1

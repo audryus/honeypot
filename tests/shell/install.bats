@@ -408,7 +408,7 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   sleep() { :; }
   ( ( exit 3 ) || on_failure 2>/dev/null )   # subshell: on_failure turns off -e
   grep -qx "auditctl -D -k $AUDIT_KEY" "$T/calls"
-  grep -qx "auditctl -c -R $RULES_FILE" "$T/calls"
+  grep -qx "auditctl -R $RULES_FILE" "$T/calls"
   grep -qx "systemctl start $SERVICE_NAME" "$T/calls"
 }
 
