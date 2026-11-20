@@ -40,6 +40,8 @@ SETS = {
     "BECH32": "qpzry9x8gf2tvdw0s3jn54khce6mua7l",
     "PASS": A + "!*-_.~+=",  # RFC 3986 unreserved / sub-delims: valid in a URL userinfo
 }
+DEFAULT_LEN = 16
+DEFAULT_WORDS = 12
 # Subset of the BIP39 English list (enough to look like a real seed phrase)
 WORDS = """abandon ability absorb access actor adapt afford agent alarm album anchor
 angle answer apple arena armor arrow artist atom auction autumn avocado badge balance
@@ -74,54 +76,101 @@ volcano voyage walnut warrior wasp weasel whale whisper wisdom wolf yellow zebra
 TOKEN = re.compile(r"@@([A-Z0-9]+)(?::(\d+))?(?::([A-Za-z0-9_]+))?@@")
 
 
-def main():
-    if len(sys.argv) < 5 or len(sys.argv) % 2 == 0:
-        sys.exit(__doc__)
-    user, host, *pairs = sys.argv[1:]
+def random_chars(alphabet, n):
+    return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+def random_words(n):
+    return " ".join(secrets.choice(WORDS) for _ in range(n))
+
+
+def gen(kind, n, user, host):
+    """A fresh value for one token kind; n = 0 means the kind's default size."""
+    if kind == "USER":
+        return user
+    if kind == "HOST":
+        return host
+    if kind == "UUID":
+        return str(uuid.uuid4())
+    if kind == "WORDS":
+        return random_words(n or DEFAULT_WORDS)
+    if kind not in SETS:
+        raise SystemExit(f"render-bait: unknown token kind @@{kind}@@")
+    return random_chars(SETS[kind], n or DEFAULT_LEN)
+
+
+def token_value(m, user, host, named):
+    """Value for one TOKEN match; named tokens reuse the value stored in NAMED."""
+    kind, n, name = m.group(1), int(m.group(2) or 0), m.group(3)
+    if not name:
+        return gen(kind, n, user, host)
+    if name not in named:
+        named[name] = gen(kind, n, user, host)
+    return named[name]
+
+
+def render(text, user, host, named):
+    return TOKEN.sub(lambda m: token_value(m, user, host, named), text)
+
+
+def read_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def render_all(pairs, user, host):
+    """[(dst, rendered text)] for [(src, dst)]; nothing is written yet, so a
+    bad token aborts before any file exists. Named values span all files."""
     named = {}
+    return [(dst, render(read_text(src), user, host, named)) for src, dst in pairs]
 
-    def gen(kind, n):
-        if kind == "USER":
-            return user
-        if kind == "HOST":
-            return host
-        if kind == "UUID":
-            return str(uuid.uuid4())
-        if kind == "WORDS":
-            return " ".join(secrets.choice(WORDS) for _ in range(n or 12))
-        if kind not in SETS:
-            raise SystemExit(f"render-bait: unknown token kind @@{kind}@@")
-        return "".join(secrets.choice(SETS[kind]) for _ in range(n or 16))
 
-    def sub(m):
-        kind, n, name = m.group(1), int(m.group(2) or 0), m.group(3)
-        if not name:
-            return gen(kind, n)
-        if name not in named:
-            named[name] = gen(kind, n)
-        return named[name]
+def create_new(dst):
+    """fd of a new DST (mode 600); raises if it already exists."""
+    return os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 
-    # All or nothing: render every template first (a bad token aborts before
-    # anything is written), then write; if a write fails, remove what this run
-    # wrote, so a re-run doesn't refuse half-created baits as "real" files.
-    rendered = []
-    for src, dst in zip(pairs[::2], pairs[1::2]):
-        with open(src, encoding="utf-8") as f:
-            rendered.append((dst, TOKEN.sub(sub, f.read())))
+
+def write_fd(fd, data):
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(data)
+
+
+def remove_quietly(paths):
+    for p in paths:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+def write_all(rendered):
+    """Write every file or none: if one write fails, remove what this run
+    wrote, so a re-run doesn't refuse half-created baits as "real" files."""
     written = []
     try:
         for dst, data in rendered:
-            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = create_new(dst)
             written.append(dst)  # only after O_EXCL succeeded: it's ours
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
+            write_fd(fd, data)
     except BaseException:
-        for dst in written:
-            try:
-                os.unlink(dst)
-            except OSError:
-                pass
+        remove_quietly(written)
         raise
+
+
+def parse_args(argv):
+    """(user, host, [(src, dst), ...]) or None if the arguments are wrong."""
+    if len(argv) < 4 or len(argv) % 2:
+        return None
+    user, host, *rest = argv
+    return user, host, list(zip(rest[::2], rest[1::2]))
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args is None:
+        sys.exit(__doc__)
+    user, host, pairs = args
+    write_all(render_all(pairs, user, host))
 
 
 if __name__ == "__main__":

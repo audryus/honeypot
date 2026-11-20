@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-host intrusion tripwire for Linux: a fake "passwords" bait file is watched by auditd, and any open/write/attr-change on it triggers a root daemon that contains the intruder, collects forensics, and sends alerts. No build system, no tests, no dependencies beyond the Python 3 stdlib and system tools (`auditd`/`ausearch`/`auditctl`, `nft`, `ss`, `loginctl`, `journalctl`, `ip`, `getent`, `who`).
+A single-host intrusion tripwire for Linux: a fake "passwords" bait file is watched by auditd, and any open/write/attr-change on it triggers a root daemon that contains the intruder, collects forensics, and sends alerts. No build system, no dependencies beyond the Python 3 stdlib and system tools (`auditd`/`ausearch`/`auditctl`, `nft`, `ss`, `loginctl`, `journalctl`, `ip`, `getent`, `who`).
 
 **Core requirement: stealth.** An intruder who can tell this is a honeypot just avoids the bait. Nothing installed may carry an obvious name: the unit name/description, handler path, config path, report dir, audit rules file, audit key and nft table are all user-chosen in the config's STEALTH section (defaults mimic polkit). Journal output from the handler must stay bland (details go only to root-only report files), and the handler must not spawn long-lived tell-tale children (that's why it follows the audit log in-process instead of `tail -F`). Keep these properties when changing anything.
 
@@ -38,9 +38,10 @@ The rule deliberately avoids `-w <bait> -p r`: auditd's read class includes getx
 
 ## Development
 
-There is no test suite. Useful checks:
+Tests cover the two Python scripts (stdlib `unittest`, no install needed; the shell scripts have none). The handler tests fake `run()`, `os.kill`, `http` and `urlopen` in `setUp` (`Base` in `tests/test_handler.py`), so they never run a command, kill anything, touch nftables or the network; keep new tests on `Base`. Keep functions small and side effects behind `run()`/`os.kill`/`http` so they stay testable. `tests/` is never installed (install.sh copies only the two scripts).
 
 ```bash
+python3 -m unittest discover -s tests && rm -rf tests/__pycache__   # all tests (~2 s)
 python3 -m py_compile honeypot-handler.py render-bait.py && rm -rf __pycache__
 python3 -I render-bait.py alice nas01 examples/.git-credentials /tmp/out   # render one template (install.sh uses `uname -n`, not `hostname -s`)
 bash -n install.sh uninstall.sh common.sh        # shellcheck *.sh if installed

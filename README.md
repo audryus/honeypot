@@ -998,6 +998,7 @@ Copy that installed config into the repository as `honeypot.conf`, then run
 │   ├── password.txt
 │   ├── .aws/  .ssh/  .kube/  .electrum/  projects/  vpn/
 │   └── .git-credentials
+├── tests/                  unit tests: python3 -m unittest discover -s tests
 └── LICENSE
 ```
 
