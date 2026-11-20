@@ -21,7 +21,7 @@ PORT=8765
 U=hpalice               # bait owner
 UHOME=/home/$U
 KEY=$W/id_ed25519
-IP2=10.99.0.1           # extra local address: a source the handler may ban
+IP2=10.99.0.1           # extra local address: a source the handler may ban (see setup)
 FAILS=0
 
 # Names used by the install (the example's defaults)
@@ -114,20 +114,41 @@ trap 'finish; exit $?' EXIT
 
 # ------------------------------------------------------------- machine setup
 group "setup"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >/dev/null
-apt-get install -y -qq openssh-server openssh-client auditd nftables iproute2 >/dev/null || die "apt install"
+# Any systemd distro with apt, dnf or pacman (the VM tests run this too)
+if command -v apt-get >/dev/null; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq >/dev/null
+  apt-get install -y -qq openssh-server openssh-client auditd nftables iproute2 python3 >/dev/null || die "apt install"
+elif command -v dnf >/dev/null; then
+  dnf install -y -q openssh-server openssh-clients audit nftables iproute python3 procps-ng >/dev/null || die "dnf install"
+elif command -v pacman >/dev/null; then
+  pacman -Syu --needed --noconfirm openssh audit nftables iproute2 python procps-ng >/dev/null || die "pacman install"
+else
+  die "no apt-get, dnf or pacman"
+fi
 systemctl enable --now ssh >/dev/null 2>&1 || systemctl enable --now sshd >/dev/null 2>&1
 systemctl is-active --quiet ssh || systemctl is-active --quiet sshd || die "sshd not running"
 systemctl is-active --quiet auditd || systemctl start auditd || die "auditd won't start"
-auditctl -s | grep -q '^enabled 1' || die "kernel auditing not enabled on this runner"
+auditctl -s | grep -q '^enabled 1' || die "kernel auditing not enabled on this machine"
+echo "$(. /etc/os-release && echo "$PRETTY_NAME"), kernel $(uname -r), $(python3 --version)"
 
 id "$U" >/dev/null 2>&1 || useradd -m -s /bin/bash "$U"
 echo "my real notes" >"$UHOME/notes.txt"; chown "$U:" "$UHOME/notes.txt"
 ssh-keygen -q -t ed25519 -N '' -f "$KEY"
 install -d -m 700 -o "$U" -g "$U" "$UHOME/.ssh"
 install -m 600 -o "$U" -g "$U" "$KEY.pub" "$UHOME/.ssh/authorized_keys"
-ip link add hp0 type dummy 2>/dev/null; ip addr add "$IP2/32" dev hp0 2>/dev/null; ip link set hp0 up
+command -v restorecon >/dev/null && restorecon -R "$UHOME/.ssh"   # SELinux: ssh_home_t
+# A second, non-loopback local address to connect from, so the handler has a
+# source it may ban: a dummy interface, else this machine's own address (some
+# cloud kernels lack the dummy module). Banning our own address only blocks
+# connections we make to ourselves from it.
+if ip link add hp0 type dummy 2>/dev/null; then
+  ip addr add "$IP2/32" dev hp0 && ip link set hp0 up
+else
+  IP2=$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)
+  [[ -n $IP2 ]] || die "no dummy interface and no global IPv4 address"
+  echo "no dummy interface: using $IP2"
+fi
 ssh_as -- true || die "ssh to $U@127.0.0.1 doesn't work"
 ssh_as "$IP2" -- true || die "ssh to $U@$IP2 doesn't work"
 

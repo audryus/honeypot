@@ -4,10 +4,14 @@ name: tests
 # Stage 2 (heavier, only if every stage 1 job passes): the real install,
 # triggers and uninstall as root on a throwaway runner.
 
+# Stage 3, the same test inside other distributions' VMs, is in vm.yml (monthly,
+# heavy); it calls this workflow first, so it also only runs after 1 and 2 pass.
+
 on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
