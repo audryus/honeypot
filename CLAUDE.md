@@ -44,3 +44,7 @@ HONEYPOT_CONF=./honeypot.conf python3 honeypot-handler.py --test   # notificatio
 ```
 
 `HONEYPOT_CONF` overrides the baked-in config path. Calling `handle()` or running the watcher for real **kills processes and edits nftables**. Test those on a VM or with `KILL_SESSION=no BAN_IP=no`, and never against your own session. On a live install (names per config): `journalctl -u <SERVICE_NAME> -f`, `sudo <HANDLER_PATH> --bans`, `sudo <HANDLER_PATH> --unban <ip>`.
+
+## Git
+
+The main branch is **`trunk`** (there is no `main`): it's the default branch on `origin` (github.com/audryus/honeypot) and the base for PRs. Commit and push to `trunk` only when asked.
