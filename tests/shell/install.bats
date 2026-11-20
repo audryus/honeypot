@@ -236,6 +236,31 @@ collisions_setup() {
 }
 
 # ------------------------------------------------------------- syscalls, rules
+@test "check_python: 3.7 or newer passes, older or broken is fatal" {
+  fake python3 'exit 0'
+  check_python
+  fake python3 '[[ $2 == *print* ]] && echo 3.6; [[ $2 == *print* ]]'
+  run check_python
+  [ "$status" -eq 1 ]
+  [[ $output == *"python3 is 3.6"* ]]
+  fake python3 'exit 127'
+  run check_python
+  [ "$status" -eq 1 ]
+  [[ $output == *"doesn't run"* ]]
+}
+
+@test "check_python: the real python3 passes" {
+  check_python
+}
+
+@test "install_deps: refuses NixOS before installing anything" {
+  NIXOS_MARK=$T/NIXOS
+  touch "$NIXOS_MARK"
+  run install_deps
+  [ "$status" -eq 1 ]
+  [[ $output == *"NixOS isn't supported"* ]]
+}
+
 @test "probe_syscalls: keeps only what ausyscall knows, per arch" {
   fake ausyscall '[[ $1 == b64 && ( $2 == openat || $2 == openat2 ) ]]'
   probe_syscalls

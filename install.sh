@@ -24,6 +24,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Where distributions ship their own units: a SERVICE_NAME found there is real.
 SYSTEM_UNIT_DIRS=(/usr/lib/systemd/system /lib/systemd/system /run/systemd/system)
 AUDIT_RULES_DIR=/etc/audit/rules.d
+NIXOS_MARK=/etc/NIXOS
 # An unfiltered "never,task" rule turns off syscall auditing for every process
 NEVER_TASK_RE='^[[:space:]]*-a[[:space:]]+(never,task|task,never)[[:space:]]*$'
 
@@ -166,6 +167,9 @@ refuse_collisions() {
 # ------------------------------------------------------------- dependencies
 install_deps() {
   step "Installing dependencies (auditd, nftables, python3)"
+  # NixOS builds /etc/systemd/system and the audit rules from configuration.nix
+  # (read-only): a unit or rules file written here would be gone or refused.
+  [[ ! -e $NIXOS_MARK ]] || die "NixOS isn't supported: its systemd units and audit rules come from configuration.nix, so this installer can't set them"
   if command -v apt-get >/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq auditd nftables python3 iproute2 >/dev/null
   elif command -v dnf >/dev/null; then
@@ -176,6 +180,16 @@ install_deps() {
     die "unsupported package manager: install auditd, nftables, python3 manually"
   fi
   systemctl enable --now auditd >/dev/null 2>&1 || true
+}
+
+# The handler and render-bait.py use subprocess.run(capture_output=, text=):
+# 3.7+. Checked before anything is created (RHEL 8's python3 is 3.6).
+check_python() {
+  local v
+  v=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) \
+    || die "python3 doesn't run: install Python 3.7 or newer"
+  python3 -c 'import sys; sys.exit(sys.version_info < (3, 7))' \
+    || die "python3 is $v: the handler needs Python 3.7 or newer"
 }
 
 # Not `-p r`: its read class includes getxattr/listxattr, which `ls -l` calls on
@@ -532,6 +546,7 @@ main() {
   collect_baits
   refuse_collisions
   install_deps
+  check_python
   probe_syscalls
   preflight_audit "$(auditctl -l 2>/dev/null)"
   trap on_failure EXIT

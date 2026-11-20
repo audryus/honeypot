@@ -11,6 +11,11 @@ on:
     # this fires every Saturday and the gate job skips all but the first one.
     - cron: "0 11 * * 6"
   workflow_dispatch:
+    inputs:
+      flavor:
+        description: "One flavor (tests/vm/flavors/<name>.sh), empty = all"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -30,20 +35,42 @@ jobs:
             echo run=false >>"$GITHUB_OUTPUT"
           fi
 
+  # Every tests/vm/flavors/<name>.sh is a flavor: adding a distribution is
+  # adding a file there. Each becomes its own job, all running in parallel.
+  flavors:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      list: ${{ steps.ls.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ls
+        env:
+          ONLY: ${{ inputs.flavor }}
+        run: |
+          list=$(cd tests/vm/flavors && ls -- *.sh | sed 's/\.sh$//')
+          if [ -n "$ONLY" ]; then
+            grep -qx -- "$ONLY" <<<"$list" || { echo "::error::no flavor '$ONLY' (have: $(echo $list))"; exit 1; }
+            list=$ONLY
+          fi
+          echo "list=$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))' <<<"$list")" >>"$GITHUB_OUTPUT"
+          echo "flavors: $(echo $list)"
+
   tests:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     uses: ./.github/workflows/tests.yml
 
   vm:
-    name: vm (${{ matrix.distro }})
-    needs: tests
+    name: vm (${{ matrix.flavor }})
+    needs: [tests, flavors]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        distro: [debian-12, debian-13, rocky-9, rocky-10, fedora, arch]
+        flavor: ${{ fromJSON(needs.flavors.outputs.list) }}
     steps:
       - uses: actions/checkout@v4
       - name: QEMU and KVM
@@ -53,5 +80,5 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules >/dev/null
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
-      - name: Integration test in a ${{ matrix.distro }} VM
-        run: tests/vm/run.sh ${{ matrix.distro }}
+      - name: Integration test in a ${{ matrix.flavor }} VM
+        run: tests/vm/run.sh "${{ matrix.flavor }}"

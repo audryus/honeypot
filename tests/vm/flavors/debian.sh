@@ -1,0 +1,2 @@
+# Debian stable (13, trixie)
+image_url() { echo https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2; }
