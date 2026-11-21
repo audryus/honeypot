@@ -20,6 +20,10 @@ It's one Python file (stdlib only) plus shell scripts. There's nothing to
 compile and no pip packages. It uses Linux's own audit subsystem (`auditd`), so
 detection is in-kernel and can't be skipped by tools that avoid `cat`.
 
+> **Installing with an AI agent?** Point it at [AGENTS.md](AGENTS.md) first:
+> an agent that reads or searches a bait file triggers the trap like anyone
+> else (and may lock you out), and its own session records can give the trap away.
+
 ---
 
 ## Table of contents
@@ -994,6 +998,8 @@ Copy that installed config into the repository as `honeypot.conf`, then run
 ├── honeypot-handler.py     the watcher daemon + CLI (stdlib-only Python)
 ├── render-bait.py          fills @@TOKEN@@ templates with random values
 ├── honeypot.conf.example   documented configuration; copy to honeypot.conf
+├── AGENTS.md               rules for an AI agent installing or running it
+├── CLAUDE.md               notes for an AI agent changing the code
 ├── examples/               decoys (templates), see examples/README.md
 │   ├── password.txt
 │   ├── .aws/  .ssh/  .kube/  .electrum/  projects/  vpn/

@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Asked to install, check, change or remove the tripwire on a machine (not to change the code)? Read [AGENTS.md](AGENTS.md) instead.** Above all: never open, read or search a bait file, since doing so triggers the trap against you and possibly against the owner's own session.
+
 ## What this is
 
 A single-host intrusion tripwire for Linux: a fake "passwords" bait file is watched by auditd, and any open/write/attr-change on it triggers a root daemon that contains the intruder, collects forensics, and sends alerts. No build system, no dependencies beyond the Python 3 stdlib and system tools (`auditd`/`ausearch`/`auditctl`, `nft`, `ss`, `loginctl`, `journalctl`, `ip`, `getent`, `who`).
