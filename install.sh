@@ -411,6 +411,7 @@ unit_text() {
 Description=$SERVICE_DESCRIPTION
 After=auditd.service network-online.target
 Wants=auditd.service network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=$HANDLER_PATH
@@ -435,6 +436,7 @@ Description=$SERVICE_DESCRIPTION
 After=auditd.service $NIXOS_RULES_UNIT network-online.target
 Wants=auditd.service network-online.target
 PartOf=$NIXOS_RULES_UNIT
+StartLimitIntervalSec=0
 
 [Service]
 Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin

@@ -236,6 +236,7 @@ if run_install "${install_args[@]}"; then pass "install.sh succeeds"; else cat "
 tail -n 25 "$W/install.log"
 check "service is active" systemctl is-active --quiet "$SERVICE"
 check "unit installed in $UNITDIR" test -f "$UNIT"
+check "systemd never stops restarting it (no start limit)" test "$(systemctl show -p StartLimitIntervalUSec --value "$SERVICE")" = 0
 check "service starts at boot (multi-user.target wants it)" bash -c "systemctl show -p WantedBy --value '$SERVICE' | grep -qw multi-user.target"
 check "rules file is root-only (640)" test "$(stat -c '%a %U' "$RULES")" = "640 root"
 check "handler is root-only (700)" test "$(stat -c '%a %U' "$HANDLER")" = "700 root"

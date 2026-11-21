@@ -420,6 +420,7 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   grep -qx "Description=Some Helper" "$T/u"
   unit_is_ours "$T/u" /usr/lib/x/helper
   grep -qx "WantedBy=multi-user.target" "$T/u"
+  grep -qx "StartLimitIntervalSec=0" "$T/u"   # a trap never gives up restarting
 }
 
 @test "unit_text: NixOS follows its audit rules unit and sets PATH" {
@@ -428,6 +429,7 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   unit_text >"$T/u"
   unit_is_ours "$T/u" /var/lib/x/helper
   grep -qx "PartOf=audit-rules-nixos.service" "$T/u"
+  grep -qx "StartLimitIntervalSec=0" "$T/u"
   grep -q "^After=.*audit-rules-nixos.service" "$T/u"
   grep -qx "Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin" "$T/u"
   not grep -q '^\[Install\]' "$T/u"
