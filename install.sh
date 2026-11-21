@@ -24,7 +24,12 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Where distributions ship their own units: a SERVICE_NAME found there is real.
 SYSTEM_UNIT_DIRS=(/usr/lib/systemd/system /lib/systemd/system /run/systemd/system)
 AUDIT_RULES_DIR=/etc/audit/rules.d
-NIXOS_MARK=/etc/NIXOS
+# NixOS keeps every unit it knows in /etc/systemd/system (built from its config)
+NIXOS_UNIT_DIRS=(/etc/systemd/system)
+# On NixOS a path like /usr/lib/... holds nothing real: an install there stands out
+NIXOS_ODD_PATH_RE='^/(usr|opt|lib|lib64|sbin|bin)/'
+# Tools install.sh and the handler run (NixOS: checked, never installed from here)
+NIXOS_TOOLS=(auditctl ausearch ausyscall nft ss ip python3 loginctl journalctl)
 # An unfiltered "never,task" rule turns off syscall auditing for every process
 NEVER_TASK_RE='^[[:space:]]*-a[[:space:]]+(never,task|task,never)[[:space:]]*$'
 
@@ -145,8 +150,9 @@ collect_baits() {
 
 # ------------------------------------------------------------- name collisions
 refuse_collisions() {
-  local d
-  for d in "${SYSTEM_UNIT_DIRS[@]}"; do
+  local d dirs=("${SYSTEM_UNIT_DIRS[@]}")
+  if is_nixos; then dirs+=("${NIXOS_UNIT_DIRS[@]}"); fi
+  for d in "${dirs[@]}"; do
     [[ -e $d/$SERVICE_NAME.service ]] && die "SERVICE_NAME=$SERVICE_NAME is a real unit ($d), pick another"
   done
   if [[ -e $UNIT_FILE ]] && ! unit_is_ours "$UNIT_FILE" "$HANDLER_PATH" \
@@ -167,9 +173,10 @@ refuse_collisions() {
 # ------------------------------------------------------------- dependencies
 install_deps() {
   step "Installing dependencies (auditd, nftables, python3)"
-  # NixOS builds /etc/systemd/system and the audit rules from configuration.nix
-  # (read-only): a unit or rules file written here would be gone or refused.
-  [[ ! -e $NIXOS_MARK ]] || die "NixOS isn't supported: its systemd units and audit rules come from configuration.nix, so this installer can't set them"
+  if is_nixos; then
+    nixos_deps
+    return
+  fi
   if command -v apt-get >/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq auditd nftables python3 iproute2 >/dev/null
   elif command -v dnf >/dev/null; then
@@ -180,6 +187,21 @@ install_deps() {
     die "unsupported package manager: install auditd, nftables, python3 manually"
   fi
   systemctl enable --now auditd >/dev/null 2>&1 || true
+}
+
+# NixOS: packages and services come from configuration.nix, never from here.
+# (Nothing in the lines below names the trap: they end up in the world-readable store.)
+nixos_deps() {
+  local t missing=()
+  for t in "${NIXOS_TOOLS[@]}"; do command -v "$t" >/dev/null || missing+=("$t"); done
+  systemctl is-active --quiet auditd || missing+=("auditd (not running)")
+  [[ ${#missing[@]} -eq 0 ]] || die "NixOS: missing ${missing[*]}. Add this to configuration.nix, run nixos-rebuild switch, then re-run:
+    security.auditd.enable = true;
+    environment.systemPackages = with pkgs; [ python3 nftables ];"
+  echo "NixOS: auditd runs and every tool needed is there"
+  if [[ $HANDLER_PATH =~ $NIXOS_ODD_PATH_RE ]]; then
+    echo "WARNING: HANDLER_PATH=$HANDLER_PATH: NixOS keeps nothing real there, so a file in it stands out. Prefer a folder under /var/lib (e.g. /var/lib/polkit-1/agent-helper): set it in honeypot.conf (after ./uninstall.sh if already installed) and re-run" >&2
+  fi
 }
 
 # The handler and render-bait.py use subprocess.run(capture_output=, text=):
@@ -210,12 +232,28 @@ probe_syscalls() {
 # process (Fedora: "-a task,never" in /etc/audit/rules.d/audit.rules), so the
 # bait could never fire. Checked before anything is created; verify_rules
 # checks again once our rules are loaded.
-preflight_audit() { # auditctl -l output
+preflight_audit() { # auditctl -l output, auditctl -s output
   local f
   f=$(grep -lxE -- "$NEVER_TASK_RE" "$AUDIT_RULES_DIR"/*.rules 2>/dev/null | head -n1 || true)
   [[ -z $f ]] || die "$f has a '-a task,never' rule: it turns off syscall auditing for every process, so the bait could never fire. Comment that line out, unload it (auditctl -d task,never), then re-run"
   if grep -qxE -- "$NEVER_TASK_RE" <<<"$1"; then
-    die "a '-a never,task' audit rule is loaded (auditctl -l): it turns off syscall auditing for every process, so the bait could never fire. Unload it (auditctl -d task,never or -d never,task), remove it where it comes from (grep -r never /etc/audit), then re-run"
+    die "a '-a never,task' audit rule is loaded (auditctl -l): it turns off syscall auditing for every process, so the bait could never fire. Unload it (auditctl -d task,never or -d never,task), remove it where it comes from ($(never_source_hint)), then re-run"
+  fi
+  # "enabled 2": the rules are locked until reboot, ours can't be added
+  if [[ $(awk '$1 == "enabled" {print $2}' <<<"${2:-}") == 2 ]]; then
+    die "the audit rules are locked (auditctl -s: enabled 2), so the bait's rules can't be added. $(lock_hint)"
+  fi
+}
+
+never_source_hint() {
+  if is_nixos; then echo "security.audit.rules in configuration.nix"; else echo "grep -r never /etc/audit"; fi
+}
+
+lock_hint() {
+  if is_nixos; then
+    echo 'Set security.audit.enable = true (not "lock") in configuration.nix, nixos-rebuild boot, reboot, then re-run'
+  else
+    echo "Remove the '-e 2' line from the audit rules (grep -r -- '-e 2' /etc/audit), reboot, then re-run"
   fi
 }
 
@@ -367,6 +405,7 @@ install_config() {
 }
 
 unit_text() {
+  if is_nixos; then nixos_unit_text; return; fi
   cat <<EOF
 [Unit]
 Description=$SERVICE_DESCRIPTION
@@ -383,9 +422,50 @@ WantedBy=multi-user.target
 EOF
 }
 
+# NixOS: no [Install] (systemctl enable can't write to /etc/systemd/system;
+# enable_unit links the unit by hand). When NixOS (re)loads its audit rules
+# (boot, a nixos-rebuild that changes them) it first deletes every rule:
+# PartOf= stops us with it, the .wants link starts us again after it (After=),
+# and the handler then loads our rules file again (ensure_rules). PATH:
+# systemd's default there holds only systemd's own tools.
+nixos_unit_text() {
+  cat <<EOF
+[Unit]
+Description=$SERVICE_DESCRIPTION
+After=auditd.service $NIXOS_RULES_UNIT network-online.target
+Wants=auditd.service network-online.target
+PartOf=$NIXOS_RULES_UNIT
+
+[Service]
+Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin
+ExecStart=$HANDLER_PATH
+Restart=always
+RestartSec=2
+EOF
+}
+
+wanted_by() { # units that pull ours in
+  echo multi-user.target
+  if is_nixos; then echo "$NIXOS_RULES_UNIT"; fi
+}
+
 install_unit() {
   step "Installing service -> $UNIT_FILE"
+  mkdir -p "$UNIT_DIR"
   unit_text >"$UNIT_FILE"
+}
+
+enable_unit() {
+  local t d
+  if ! is_nixos; then
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+    return
+  fi
+  for t in $(wanted_by); do   # what systemctl enable does, in the unit's own folder
+    d="$UNIT_DIR/$t.wants"
+    mkdir -p "$d"
+    ln -sfn "../$SERVICE_NAME.service" "$d/$SERVICE_NAME.service"
+  done
 }
 
 # ------------------------------------------------------------- audit rules
@@ -403,10 +483,14 @@ rules_text() { # per bait: a write/attribute watch, plus the open syscalls probe
 
 load_rules() {
   step "Loading audit rules -> $RULES_FILE"
+  # root-only: it lists every bait (NixOS has no rules.d: created, root-only too)
+  [[ -d $(dirname "$RULES_FILE") ]] || install -d -m 750 "$(dirname "$RULES_FILE")"
   rules_text >"$RULES_FILE"
   chmod 640 "$RULES_FILE"
   cat "$RULES_FILE"
-  augenrules --load >/dev/null 2>&1 || true
+  # Never augenrules on NixOS: it would write /etc/audit/audit.rules from our
+  # file alone. There, reload_rules loads it now and the handler at every start.
+  is_nixos || augenrules --load >/dev/null 2>&1 || true
   # augenrules stops at the first rule the kernel refuses (seen on Arch): reload ours alone
   rules_complete "$(auditctl -l 2>/dev/null)" || reload_rules "$RULES_FILE" "$AUDIT_KEY" || true
   auditctl -l | grep -- "-k $AUDIT_KEY" || die "audit rule not loaded"
@@ -508,7 +592,7 @@ e2e_test() {
 start_service() {
   step "Starting service $SERVICE_NAME"
   systemctl daemon-reload
-  systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+  enable_unit
   systemctl restart "$SERVICE_NAME"
   sleep 1
   systemctl is-active "$SERVICE_NAME"
@@ -548,7 +632,7 @@ main() {
   install_deps
   check_python
   probe_syscalls
-  preflight_audit "$(auditctl -l 2>/dev/null)"
+  preflight_audit "$(auditctl -l 2>/dev/null)" "$(auditctl -s 2>/dev/null)"
   trap on_failure EXIT
   disarm
   create_baits

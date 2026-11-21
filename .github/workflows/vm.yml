@@ -66,7 +66,7 @@ jobs:
     name: vm (${{ matrix.flavor }})
     needs: [tests, flavors]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -80,5 +80,19 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules >/dev/null
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
+      # A flavor with image_build builds its own image (nixos: with Nix, which
+      # needs KVM for the disk image: installed after the KVM step)
+      - name: Does the flavor build its image?
+        id: kind
+        run: |
+          if grep -q '^image_build()' "tests/vm/flavors/${{ matrix.flavor }}.sh"; then
+            echo build=true >>"$GITHUB_OUTPUT"
+          fi
+      - name: Nix
+        if: steps.kind.outputs.build == 'true'
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
       - name: Integration test in a ${{ matrix.flavor }} VM
         run: tests/vm/run.sh "${{ matrix.flavor }}"

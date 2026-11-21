@@ -108,7 +108,7 @@ detection is in-kernel and can't be skipped by tools that avoid `cat`.
 | | |
 |---|---|
 | OS | Linux with **systemd** |
-| Package manager (for auto-install of deps) | `apt` (Debian/Ubuntu), `dnf` (Fedora/RHEL), `pacman` (Arch). Others work if you install the deps by hand. |
+| Package manager (for auto-install of deps) | `apt` (Debian/Ubuntu), `dnf` (Fedora/RHEL), `pacman` (Arch). Others work if you install the deps by hand. NixOS: see [How to install on NixOS](#how-to-install-on-nixos). |
 | Dependencies (installed automatically) | `auditd`/`audit`, `nftables`, `python3`, `iproute2` |
 | Privileges | root (`sudo`) |
 | Network | Outbound HTTPS for notifications (and ipinfo.io if enabled) |
@@ -627,6 +627,43 @@ a `terraform.tfstate`.
 **Don't put fixed fake secrets in templates.** Anything fixed is published in
 your fork and can be searched for. Paths can't contain spaces.
 
+### How to install on NixOS
+
+NixOS builds its units and audit rules from `configuration.nix`, so
+install.sh installs nothing there: add these two lines and rebuild first
+(install.sh stops and prints them if something is missing):
+
+```nix
+security.auditd.enable = true;
+environment.systemPackages = with pkgs; [ python3 nftables ];
+```
+
+```bash
+sudo nixos-rebuild switch
+```
+
+Then install as on any other distribution (`./install.sh ...` from a root
+shell). Before that, pick a `HANDLER_PATH` outside `/usr`, e.g.
+`/var/lib/polkit-1/agent-helper`: NixOS keeps nothing real in `/usr/lib`, so a
+file there stands out (install.sh warns about it).
+
+What's different on NixOS, and why:
+
+- **No `configuration.nix` changes for the trap itself.** Everything in the Nix
+  store is world-readable, so audit rules declared there would show every user
+  where the baits are. The rules stay in the root-only file
+  `/etc/audit/rules.d/<RULES_NAME>.rules`, loaded with `auditctl`
+  (never `augenrules`, which would overwrite NixOS's rules).
+- **The unit goes to `/etc/systemd/system.control/`** (`/etc/systemd/system`
+  is read-only there). It's enabled with `.wants` links made by hand and
+  `nixos-rebuild` leaves it alone (it only manages units it built itself).
+- **Rules survive reboots and rebuilds.** NixOS loads its own audit rules with
+  `audit-rules-nixos.service`, which deletes every loaded rule when it stops.
+  The service is bound to that unit: it's stopped and started again with it, and
+  at every start the handler loads its rules file if any rule is missing.
+- `security.audit.enable = "lock"` is refused (rules locked until reboot,
+  ours couldn't be added). Use `true`.
+
 ### How to protect several machines
 
 Keep one private copy of the repository and your `honeypot.conf` on your
@@ -810,7 +847,7 @@ comments, quotes optional.
 |---|---|---|
 | Handler | `HANDLER_PATH` → `/usr/lib/polkit-1/polkit-agent-helper` | 700 root |
 | Config | `CONF_PATH` → `/etc/polkit-1/agent-helper.conf` | 600 root |
-| systemd unit | `/etc/systemd/system/<SERVICE_NAME>.service` | 644 |
+| systemd unit | `/etc/systemd/system/<SERVICE_NAME>.service` (NixOS: `/etc/systemd/system.control/`) | 644 |
 | Audit rules | `/etc/audit/rules.d/<RULES_NAME>.rules` | 640 |
 | Reports | `REPORT_DIR/*.log` (+ `REPORT_DIR/state`: when the last heartbeat went out) | 700 dir / 600 files |
 | Firewall | nft table `inet <NFT_TABLE>` with sets `banned4`, `banned6` | in memory |
@@ -1005,7 +1042,7 @@ Copy that installed config into the repository as `honeypot.conf`, then run
 │   ├── .aws/  .ssh/  .kube/  .electrum/  projects/  vpn/
 │   └── .git-credentials
 ├── tests/                  unit tests (python3 -m unittest discover -s tests; bats tests/shell),
-│                           integration test (CI only), multi-distro VM test (monthly)
+│                           integration test (CI only), multi-distro VM test incl. NixOS (monthly)
 └── LICENSE
 ```
 

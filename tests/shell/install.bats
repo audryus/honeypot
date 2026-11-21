@@ -25,7 +25,12 @@ setup() {
   RULES_FILE=$T/rules
   LEGACY_RULES=$T/legacy.rules
   SERVICE_NAME=svc
+  UNIT_DIR=$T/units
+  UNIT_FILE=$UNIT_DIR/svc.service
+  NIXOS_MARK=$T/NIXOS   # absent: not NixOS (nixos() creates it)
 }
+
+nixos() { touch "$NIXOS_MARK"; }
 
 teardown() {
   rm -rf "$T"
@@ -226,6 +231,17 @@ collisions_setup() {
   [[ $output == *"change CONF_PATH"* ]]
 }
 
+@test "refuse_collisions: NixOS units (in /etc/systemd/system there) count as real" {
+  collisions_setup
+  NIXOS_UNIT_DIRS=("$T/nixos-units"); mkdir -p "$T/nixos-units"
+  touch "$T/nixos-units/svc.service"
+  refuse_collisions   # not NixOS: that folder isn't looked at
+  nixos
+  run refuse_collisions
+  [ "$status" -eq 1 ]
+  [[ $output == *"is a real unit"* ]]
+}
+
 @test "refuse_collisions: our own earlier install (or the legacy one) is fine" {
   collisions_setup
   cp "$ROOT/honeypot-handler.py" "$HANDLER_PATH"
@@ -253,12 +269,41 @@ collisions_setup() {
   check_python
 }
 
-@test "install_deps: refuses NixOS before installing anything" {
-  NIXOS_MARK=$T/NIXOS
-  touch "$NIXOS_MARK"
+@test "install_deps: NixOS installs nothing, checks the tools and auditd" {
+  nixos
+  for t in "${NIXOS_TOOLS[@]}"; do fake "$t" ""; done
+  fake systemctl 'exit 0'
+  fake apt-get ""; fake dnf ""; fake pacman ""
+  HANDLER_PATH=/var/lib/x/helper
   run install_deps
+  [ "$status" -eq 0 ]
+  not grep -qE '^(apt-get|dnf|pacman|systemctl enable)' "$T/calls"
+  not grep -q WARNING <<<"$output"
+}
+
+@test "install_deps: NixOS says what to add to configuration.nix" {
+  nixos
+  for t in "${NIXOS_TOOLS[@]}"; do fake "$t" ""; done
+  rm "$FAKEBIN/nft"
+  fake systemctl '[[ $3 != auditd ]]'   # is-active --quiet auditd: no
+  local path=$PATH
+  PATH=$FAKEBIN   # only the fakes: no real nft either
+  run install_deps
+  PATH=$path
   [ "$status" -eq 1 ]
-  [[ $output == *"NixOS isn't supported"* ]]
+  [[ $output == *"missing nft auditd (not running)"* ]]
+  [[ $output == *"security.auditd.enable = true;"* ]]
+  [[ $output == *"[ python3 nftables ]"* ]]
+}
+
+@test "install_deps: NixOS warns about a handler under /usr" {
+  nixos
+  for t in "${NIXOS_TOOLS[@]}"; do fake "$t" ""; done
+  fake systemctl 'exit 0'
+  HANDLER_PATH=/usr/lib/polkit-1/polkit-agent-helper
+  run install_deps
+  [ "$status" -eq 0 ]
+  [[ $output == *"WARNING: HANDLER_PATH=/usr/lib/polkit-1/polkit-agent-helper"* ]]
 }
 
 @test "probe_syscalls: keeps only what ausyscall knows, per arch" {
@@ -343,6 +388,19 @@ pid 42'
   [[ $output == *"is loaded"* ]]
 }
 
+@test "preflight_audit: locked rules (enabled 2) are refused, with the NixOS fix there" {
+  AUDIT_RULES_DIR=$T/rules.d
+  preflight_audit "$LOADED_NEW" "enabled 1"
+  run preflight_audit "$LOADED_NEW" $'enabled 2\npid 5'
+  [ "$status" -eq 1 ]
+  [[ $output == *"locked"* ]]
+  [[ $output == *"-e 2"* ]]
+  nixos
+  run preflight_audit "$LOADED_NEW" "enabled 2"
+  [ "$status" -eq 1 ]
+  [[ $output == *'security.audit.enable = true (not "lock")'* ]]
+}
+
 @test "preflight_audit: a commented-out or filtered rule is fine" {
   AUDIT_RULES_DIR=$T/rules.d; mkdir -p "$AUDIT_RULES_DIR"
   printf -- '# -a task,never\n-a never,task -F exe=/usr/bin/x\n' >"$AUDIT_RULES_DIR/audit.rules"
@@ -361,6 +419,38 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   unit_text >"$T/u"
   grep -qx "Description=Some Helper" "$T/u"
   unit_is_ours "$T/u" /usr/lib/x/helper
+  grep -qx "WantedBy=multi-user.target" "$T/u"
+}
+
+@test "unit_text: NixOS follows its audit rules unit and sets PATH" {
+  nixos
+  HANDLER_PATH=/var/lib/x/helper SERVICE_DESCRIPTION="Some Helper"
+  unit_text >"$T/u"
+  unit_is_ours "$T/u" /var/lib/x/helper
+  grep -qx "PartOf=audit-rules-nixos.service" "$T/u"
+  grep -q "^After=.*audit-rules-nixos.service" "$T/u"
+  grep -qx "Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin" "$T/u"
+  not grep -q '^\[Install\]' "$T/u"
+}
+
+@test "enable_unit: systemctl enable, except on NixOS: links next to the unit" {
+  enable_unit
+  grep -qx "systemctl enable svc" "$T/calls"
+  [ ! -e "$UNIT_DIR" ]
+  : >"$T/calls"
+  nixos
+  enable_unit
+  enable_unit   # re-runs are fine
+  not grep -q "systemctl enable" "$T/calls"
+  [ "$(readlink "$UNIT_DIR/multi-user.target.wants/svc.service")" = ../svc.service ]
+  [ "$(readlink "$UNIT_DIR/audit-rules-nixos.service.wants/svc.service")" = ../svc.service ]
+}
+
+@test "install_unit: creates the unit folder (NixOS control folder)" {
+  nixos
+  HANDLER_PATH=/var/lib/x/helper SERVICE_DESCRIPTION=d
+  install_unit >/dev/null
+  unit_is_ours "$UNIT_FILE" /var/lib/x/helper
 }
 
 # ------------------------------------------------------------- baits on disk
@@ -472,6 +562,20 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   run reload_rules "$RULES_FILE" k1
   [ "$status" -eq 1 ]
   [ "$(grep -c -- "-R $RULES_FILE" "$T/calls")" -eq 3 ]
+}
+
+@test "load_rules: NixOS never runs augenrules, creates a root-only rules folder" {
+  nixos
+  RULES_FILE=$T/audit/rules.d/50-x.rules
+  add_example password.txt
+  probe_syscalls
+  fake auditctl "if [[ \$1 == -l ]] && grep -q -- '-R' '$T/calls'; then cat '$RULES_FILE'; fi; true"
+  sleep() { :; }
+  load_rules >/dev/null
+  not grep -q augenrules "$T/calls"
+  [ "$(grep -c -- "-R $RULES_FILE" "$T/calls")" -eq 1 ]
+  [ "$(stat -c %a "$T/audit/rules.d")" = 750 ]
+  [ "$(stat -c %a "$RULES_FILE")" = 640 ]
 }
 
 @test "load_rules: a complete load isn't touched" {

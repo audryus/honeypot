@@ -67,6 +67,8 @@ SERVICE_DESCRIPTION=Authorization Agent Helper
 #   Examples: /usr/lib/polkit-1/polkit-agent-helper
 #             /usr/libexec/udisks2/udisks-monitor
 #             /usr/local/lib/fwupd/fwupd-agent
+#   NixOS: keeps nothing real under /usr, pick a folder under /var/lib
+#             (e.g. /var/lib/polkit-1/agent-helper)
 HANDLER_PATH=/usr/lib/polkit-1/polkit-agent-helper
 
 # [everyone*] Where this config is installed (mode 600, root only).
@@ -81,7 +83,8 @@ CONF_PATH=/etc/polkit-1/agent-helper.conf
 REPORT_DIR=/var/lib/polkit-1/agent-cache
 
 # [root] Audit rules file name inside /etc/audit/rules.d/ (".rules" is added).
-#   The number sets load order; any 10-90 is fine.
+#   The number sets load order; any 10-90 is fine. (NixOS: the handler loads
+#   this file itself at every start.)
 #   Examples: 50-polkit, 40-udisks, 60-local
 RULES_NAME=50-polkit
 

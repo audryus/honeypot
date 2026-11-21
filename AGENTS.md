@@ -81,8 +81,11 @@ them.
   replace a symlink it refuses to follow, and don't remove a
   `-a never,task` audit rule or change `auditd.conf` without the owner's
   OK: that may be a security policy on purpose.
-- NixOS is refused (units and audit rules come from `configuration.nix`).
-  Tell the owner; don't try to install around it.
+- NixOS: install.sh never edits `configuration.nix`. If it stops with
+  "NixOS: missing ...", show the owner the lines it prints; they add them and
+  run `nixos-rebuild switch` themselves. Never add the bait paths or audit rules
+  to `configuration.nix` (the Nix store is world-readable: it would give the
+  baits away). See the README's "How to install on NixOS".
 
 ## Install, step by step
 

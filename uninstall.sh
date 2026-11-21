@@ -28,7 +28,7 @@ remove_service() {
   remove_install "$UNIT_FILE" "$HANDLER_PATH" "$RULES_FILE" "$AUDIT_KEY" "$NFT_TABLE"
   remove_install "/etc/systemd/system/$LEGACY_SERVICE.service" "$LEGACY_HANDLER" "$LEGACY_RULES" "$LEGACY_KEY" "$LEGACY_TABLE"
   systemctl daemon-reload
-  augenrules --load >/dev/null 2>&1 || true
+  is_nixos || augenrules --load >/dev/null 2>&1 || true   # never on NixOS (see install.sh: load_rules)
 }
 
 home_dirs() { # " /home/a /root ... " (canonical): parent folders are never removed past these

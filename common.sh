@@ -36,6 +36,16 @@ LEGACY_RULES=/etc/audit/rules.d/honeypot.rules
 LEGACY_KEY=honeypot
 LEGACY_TABLE=honeypot
 
+# NixOS: /etc/systemd/system and the system's audit rules are built from
+# configuration.nix (read-only, world-readable store). Our unit goes to the
+# persistent "control" unit folder instead and our rules stay in a root-only
+# file loaded with auditctl (see install.sh: nixos_*, and the handler's
+# ensure_rules). NixOS loads its own rules with this unit, which deletes every
+# loaded rule (ours too) when it stops.
+NIXOS_MARK=/etc/NIXOS
+NIXOS_RULES_UNIT=audit-rules-nixos.service
+is_nixos() { [[ -e $NIXOS_MARK ]]; }
+
 # A line only the handler contains: used to recognise our own installed copy.
 HANDLER_MARKER='watches the auditd log for access to a bait file'
 
@@ -67,7 +77,9 @@ load_names() {
     / | /etc | /usr | /var | /var/lib | /var/log | /var/cache | /tmp | /root | /home) die "REPORT_DIR=$REPORT_DIR is too broad, use a dedicated folder" ;;
   esac
 
-  UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+  UNIT_DIR=/etc/systemd/system
+  if is_nixos; then UNIT_DIR=/etc/systemd/system.control; fi
+  UNIT_FILE="$UNIT_DIR/$SERVICE_NAME.service"
   RULES_FILE="/etc/audit/rules.d/$RULES_NAME.rules"
 }
 
@@ -84,8 +96,15 @@ conf_is_ours()    { grep -q '^AUDIT_KEY=' "$1" 2>/dev/null; }
 
 # Remove one installed copy (service + handler + rules + audit key + nft table)
 remove_install() { # unit handler rules key table
+  local l
   if [[ -f $1 ]] && unit_is_ours "$1" "$2"; then
-    systemctl disable --now "$(basename "$1")" >/dev/null 2>&1 || true
+    systemctl stop "$(basename "$1")" >/dev/null 2>&1 || true
+    systemctl disable "$(basename "$1")" >/dev/null 2>&1 || true
+    # NixOS: the .wants links install.sh made by hand (systemctl can't there)
+    for l in "$(dirname "$1")"/*.wants/"$(basename "$1")"; do
+      [[ -L $l ]] || continue
+      rm -f -- "$l"; rmdir -- "$(dirname "$l")" 2>/dev/null || true
+    done
     rm -f "$1"
   fi
   if [[ -f $2 ]] && handler_is_ours "$2"; then rm -f "$2"; fi

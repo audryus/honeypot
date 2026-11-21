@@ -47,6 +47,7 @@ DEFAULTS = {
     "AUDIT_KEY": "pk-auth",
     "NFT_TABLE": "raw_filter",
     "REPORT_DIR": "/var/lib/polkit-1/agent-cache",
+    "RULES_NAME": "50-polkit",   # NixOS: the handler loads the rules file itself
     # containment
     "KILL_SESSION": "yes",
     "BAN_IP": "yes",
@@ -77,6 +78,11 @@ AUSEARCH_DELAY = 0.7             # let auditd flush the rest of an event
 POLL = 0.2                       # audit log polling interval
 STATE_FILE = "state"             # in REPORT_DIR: when the last heartbeat went out
 REPORT_RE = re.compile(r"^\d{8}-\d{6}-\d+\.log$")
+RULES_DIR = "/etc/audit/rules.d"
+# NixOS loads only its own audit rules (and deletes all rules when it reloads
+# them): there the handler loads ours at start (see ensure_rules).
+NIXOS_MARK = "/etc/NIXOS"
+RULES_RETRIES = 3
 LEASE_FILES = ("/etc/pihole/dhcp.leases", "/var/lib/misc/dnsmasq.leases")
 
 _last_seen = {}
@@ -743,6 +749,30 @@ def loaded_rule_problems(cfg, paths):
     return rule_problems(out, cfg["AUDIT_KEY"], paths)
 
 
+def rules_file(cfg):
+    return os.path.join(RULES_DIR, cfg["RULES_NAME"] + ".rules")
+
+
+def ensure_rules(cfg):
+    """Load our rules file if any bait's rules are missing; True once all are
+    loaded. The kernel can refuse a watch re-added right after it was deleted,
+    so delete, pause, load, check, retry (like install.sh's reload_rules).
+    `auditctl -R FILE` exactly: auditctl loads nothing if given another option."""
+    paths = baits(cfg)
+    if not paths or not loaded_rule_problems(cfg, paths):
+        return True
+    path = rules_file(cfg)
+    if not os.path.isfile(path):
+        return False
+    for attempt in range(1, RULES_RETRIES + 1):
+        run(["auditctl", "-D", "-k", cfg["AUDIT_KEY"]])
+        time.sleep(attempt)
+        run(["auditctl", "-R", path])
+        if not loaded_rule_problems(cfg, paths):
+            return True
+    return False
+
+
 def log_problems(path):
     return [] if os.path.exists(path) else [f"audit log {path} does not exist (AUDIT_LOG)"]
 
@@ -1122,6 +1152,8 @@ def follow(path):
 
 def watch():
     cfg = load_conf()
+    if os.path.exists(NIXOS_MARK) and not ensure_rules(cfg):
+        log("check failed (rules)")   # the liveness loop alerts if it lasts
     ensure_nft(cfg)
     needle = f'key="{cfg["AUDIT_KEY"]}"'
     threading.Thread(target=liveness_loop, daemon=True).start()

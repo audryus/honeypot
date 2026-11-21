@@ -8,6 +8,7 @@ setup() {
   # shellcheck source=../../common.sh
   . "$ROOT/common.sh"
   HERE=$T   # load_names reads $HERE/honeypot.conf(.example)
+  NIXOS_MARK=$T/NIXOS   # absent: not NixOS (tests create it when they mean NixOS)
   FAKEBIN=$T/bin
   mkdir -p "$FAKEBIN"
   for cmd in systemctl auditctl nft; do
@@ -108,6 +109,15 @@ not() { if "$@"; then echo "unexpectedly succeeded: $*"; return 1; fi; }
   [ "$UNIT_FILE" = /etc/systemd/system/foo-agent.service ]
   [ "$RULES_FILE" = /etc/audit/rules.d/10-foo.rules ]
   [ "$NFT_TABLE" = t1 ]
+}
+
+@test "load_names: NixOS puts the unit in the control folder, rules stay root-only" {
+  : >"$T/honeypot.conf"
+  touch "$NIXOS_MARK"
+  load_names
+  [ "$UNIT_DIR" = /etc/systemd/system.control ]
+  [ "$UNIT_FILE" = /etc/systemd/system.control/polkit-agent-helper.service ]
+  [ "$RULES_FILE" = /etc/audit/rules.d/50-polkit.rules ]
 }
 
 @test "load_names: falls back to the .example" {
@@ -235,9 +245,23 @@ bad_name() { # KEY VALUE expected-message
   [ ! -e "$T/u.service" ]
   [ ! -e "$T/h" ]
   [ ! -e "$T/r" ]
-  grep -qx 'systemctl disable --now u.service' "$T/calls"
+  grep -qx 'systemctl stop u.service' "$T/calls"
+  grep -qx 'systemctl disable u.service' "$T/calls"
   grep -qx 'auditctl -D -k k1' "$T/calls"
   grep -qx 'nft delete table inet tbl' "$T/calls"
+}
+
+@test "remove_install: drops the .wants links made by hand (NixOS), keeps others" {
+  printf 'ExecStart=%s\n' "$T/h" >"$T/u.service"
+  mkdir -p "$T/multi-user.target.wants" "$T/audit-rules-nixos.service.wants"
+  ln -s ../u.service "$T/multi-user.target.wants/u.service"
+  ln -s ../u.service "$T/audit-rules-nixos.service.wants/u.service"
+  ln -s ../other.service "$T/multi-user.target.wants/other.service"
+  remove_install "$T/u.service" "$T/h" "$T/r" k1 tbl
+  [ ! -e "$T/u.service" ]
+  [ ! -L "$T/multi-user.target.wants/u.service" ]
+  [ -L "$T/multi-user.target.wants/other.service" ]
+  [ ! -e "$T/audit-rules-nixos.service.wants" ]   # emptied: removed
 }
 
 @test "remove_install: never deletes files that aren't ours" {

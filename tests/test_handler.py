@@ -709,6 +709,94 @@ class Health(Base):
         self.assertEqual(len(p), 4)  # bait, auditctl -s, auditctl -l, log
 
 
+class EnsureRules(Base):
+    """NixOS: the handler loads its rules file at start (see ensure_rules)."""
+
+    def setUp(self):
+        super().setUp()
+        self.bait = self.file("bait")
+        self.rules_dir = os.path.join(self.d, "rules.d")
+        os.makedirs(self.rules_dir)
+        self.rules_path = os.path.join(self.rules_dir, "50-polkit.rules")
+        for p in (mock.patch.object(h, "RULES_DIR", self.rules_dir),
+                  mock.patch.object(h.time, "sleep", lambda s: None)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.c = self.cfg(BAIT_FILE=self.bait)
+
+    def loads_after(self, n):
+        """auditctl -l shows our rules once `auditctl -R` ran n times."""
+        loads = []
+        def fake(cmd, timeout=5, input=None):
+            self.run.calls.append((cmd, input))
+            if cmd[:2] == ["auditctl", "-R"]:
+                loads.append(cmd)
+            if cmd[:2] == ["auditctl", "-l"]:
+                return 0, RULES_DASH.format(b=self.bait) if len(loads) >= n else "", ""
+            return 0, "", ""
+        p = mock.patch.object(h, "run", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def write_rules(self):
+        with open(self.rules_path, "w") as f:
+            f.write(RULES_DASH.format(b=self.bait))
+
+    def test_rules_file_from_rules_name(self):
+        self.assertEqual(h.rules_file(self.cfg(RULES_NAME="10-x")), os.path.join(self.rules_dir, "10-x.rules"))
+
+    def test_loaded_rules_are_left_alone(self):
+        self.write_rules()
+        self.loads_after(0)
+        self.assertTrue(h.ensure_rules(self.c))
+        self.assertEqual(self.run.ran("auditctl", "-D"), [])
+        self.assertEqual(self.run.ran("auditctl", "-R"), [])
+
+    def test_missing_rules_are_loaded_from_the_file(self):
+        self.write_rules()
+        self.loads_after(1)
+        self.assertTrue(h.ensure_rules(self.c))
+        self.assertEqual(self.run.ran("auditctl", "-D"), [["auditctl", "-D", "-k", KEY]])
+        # exactly "-R file": auditctl loads nothing when given another option
+        self.assertEqual(self.run.ran("auditctl", "-R"), [["auditctl", "-R", self.rules_path]])
+
+    def test_retries_then_gives_up(self):
+        self.write_rules()
+        self.loads_after(2)
+        self.assertTrue(h.ensure_rules(self.c))
+        self.assertEqual(len(self.run.ran("auditctl", "-R")), 2)
+        self.run.calls.clear()
+        self.loads_after(99)
+        self.assertFalse(h.ensure_rules(self.c))
+        self.assertEqual(len(self.run.ran("auditctl", "-R")), h.RULES_RETRIES)
+
+    def test_no_rules_file_deletes_nothing(self):
+        self.loads_after(1)
+        self.assertFalse(h.ensure_rules(self.c))
+        self.assertEqual(self.run.ran("auditctl", "-D"), [])
+
+    def test_no_baits_nothing_to_do(self):
+        self.assertTrue(h.ensure_rules(self.cfg(BAIT_FILE="")))
+        self.assertEqual(self.run.calls, [])
+
+    def watch_once(self, nixos):
+        mark = os.path.join(self.d, "NIXOS")
+        if nixos:
+            open(mark, "w").close()
+        ensure = mock.Mock(return_value=True)
+        with mock.patch.object(h, "NIXOS_MARK", mark), \
+             mock.patch.object(h, "ensure_rules", ensure), \
+             mock.patch.object(h, "ensure_nft", lambda c: None), \
+             mock.patch.object(h, "liveness_loop", lambda: None), \
+             mock.patch.object(h, "follow", lambda path: iter(())):
+            h.watch()
+        return ensure.called
+
+    def test_watch_loads_rules_only_on_nixos(self):
+        self.assertFalse(self.watch_once(nixos=False))
+        self.assertTrue(self.watch_once(nixos=True))
+
+
 # ---------------------------------------------------------------- liveness
 class Liveness(Base):
     def test_state_roundtrip(self):

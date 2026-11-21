@@ -23,6 +23,7 @@ setup() {
   REPORT_DIR=$T/reports
   LEGACY_REPORTS=$T/legacy-reports
   home_dirs() { echo "$HOMES"; }   # instead of every home folder in getent passwd
+  NIXOS_MARK=$T/NIXOS   # absent: not NixOS
 }
 
 teardown() {
@@ -160,6 +161,14 @@ bait() { mkdir -p "$(dirname "$1")"; echo bait >"$1"; }
   grep -qx 'nft delete table inet t1' "$T/calls"
   grep -qx 'systemctl daemon-reload' "$T/calls"
   grep -qx 'augenrules --load' "$T/calls"
+}
+
+@test "remove_service: never runs augenrules on NixOS" {
+  SERVICE_NAME=svc UNIT_FILE=$T/svc.service HANDLER_PATH=$T/h RULES_FILE=$T/r AUDIT_KEY=k1 NFT_TABLE=t1
+  touch "$NIXOS_MARK"
+  remove_service
+  grep -qx 'auditctl -D -k k1' "$T/calls"
+  not grep -q augenrules "$T/calls"
 }
 
 @test "main: sourcing runs nothing; running needs root" {

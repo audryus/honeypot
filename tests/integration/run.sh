@@ -32,6 +32,13 @@ REPORTS=/var/lib/polkit-1/agent-cache
 RULES=/etc/audit/rules.d/50-polkit.rules
 AKEY=pk-auth
 TABLE=raw_filter
+# NixOS: /etc/systemd/system is read-only (built from configuration.nix), the
+# unit goes to the control folder; NixOS loads its own audit rules with
+# audit-rules-nixos.service, never augenrules.
+NIXOS=no; [[ -e /etc/NIXOS ]] && NIXOS=yes
+UNITDIR=/etc/systemd/system; [[ $NIXOS == yes ]] && UNITDIR=/etc/systemd/system.control
+UNIT=$UNITDIR/$SERVICE.service
+NIXOS_RULES_UNIT=audit-rules-nixos.service
 
 # ------------------------------------------------------------- helpers
 group() { echo "::group::$*"; }
@@ -77,6 +84,16 @@ wait_alert() { # title-prefix expected-count timeout
   return 1
 }
 last_alert() { grep "\"$1" "$ALERTS" | tail -n1; }
+wait_health() { # timeout: the handler may still be loading its rules (NixOS)
+  local i
+  for ((i = 0; i < $1; i++)); do "$HANDLER" --health >/dev/null 2>&1 && return 0; sleep 1; done
+  "$HANDLER" --health
+}
+wait_active() { # timeout
+  local i
+  for ((i = 0; i < $1; i++)); do systemctl is-active --quiet "$SERVICE" && return 0; sleep 1; done
+  return 1
+}
 install_args=(-u "$U" -e password.txt -e vpn -f "$UHOME/notes.txt")
 run_install() { # every run's output is kept in install-all.log for the diagnostics
   local r
@@ -119,8 +136,13 @@ trap 'finish; exit $?' EXIT
 
 # ------------------------------------------------------------- machine setup
 group "setup"
-# Any systemd distro with apt, dnf or pacman (the VM tests run this too)
-if command -v apt-get >/dev/null; then
+# Any systemd distro with apt, dnf or pacman, or NixOS (the VM tests run this too)
+if [[ $NIXOS == yes ]]; then
+  # packages come from configuration.nix: tests/vm/flavors/nixos.nix
+  for t in ssh auditctl ausearch nft ip ss python3 pgrep; do
+    command -v "$t" >/dev/null || die "NixOS: $t missing (see tests/vm/flavors/nixos.nix)"
+  done
+elif command -v apt-get >/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq >/dev/null
   apt-get install -y -qq openssh-server openssh-client auditd nftables iproute2 python3 >/dev/null || die "apt install"
@@ -137,7 +159,8 @@ systemctl is-active --quiet auditd || systemctl start auditd || die "auditd won'
 auditctl -s | grep -q '^enabled 1' || die "kernel auditing not enabled on this machine"
 echo "$(. /etc/os-release && echo "$PRETTY_NAME"), kernel $(uname -r), $(python3 --version)"
 
-id "$U" >/dev/null 2>&1 || useradd -m -s /bin/bash "$U"
+USHELL=/bin/bash; [[ -x $USHELL ]] || USHELL=$(command -v bash)   # NixOS has no /bin/bash
+id "$U" >/dev/null 2>&1 || useradd -m -s "$USHELL" "$U"
 echo "my real notes" >"$UHOME/notes.txt"; chown "$U:" "$UHOME/notes.txt"
 ssh-keygen -q -t ed25519 -N '' -f "$KEY"
 install -d -m 700 -o "$U" -g "$U" "$UHOME/.ssh"
@@ -177,7 +200,11 @@ endgroup
 # refuse before creating anything. Elsewhere, plant such a rule to test that.
 NEVER_RE='^[[:space:]]*-a[[:space:]]+(never,task|task,never)[[:space:]]*$'
 group "refuses a system where syscall auditing is off (-a task,never)"
-if grep -qxE "$NEVER_RE" /etc/audit/rules.d/*.rules 2>/dev/null; then
+if [[ $NIXOS == yes ]]; then
+  # NixOS's rules come from configuration.nix (security.audit.rules): plant a loaded one
+  auditctl -a task,never >/dev/null
+  planted=loaded
+elif grep -qxE "$NEVER_RE" /etc/audit/rules.d/*.rules 2>/dev/null; then
   echo "this distribution ships it: $(grep -lxE "$NEVER_RE" /etc/audit/rules.d/*.rules)"
   planted=no
 else
@@ -189,14 +216,14 @@ check_not "install.sh refuses" run_install "${install_args[@]}"
 check "it says why" grep -q "task,never" "$W/install.log"
 check_not "no bait was created" test -e "$UHOME/password.txt"
 check_not "no config was installed" test -e "$CONF"
-check_not "no service was installed" test -e "/etc/systemd/system/$SERVICE.service"
+check_not "no service was installed" test -e "$UNIT"
 # Then do what the message says (on Fedora: what its user would do)
 if [[ $planted == yes ]]; then
   rm -f /etc/audit/rules.d/10-hp-never.rules
-else
+elif [[ $planted == no ]]; then
   sed -i -E "s/$NEVER_RE/# &/" /etc/audit/rules.d/*.rules
 fi
-augenrules --load >/dev/null 2>&1
+[[ $NIXOS == yes ]] || augenrules --load >/dev/null 2>&1
 # augenrules only clears loaded rules if the rules have a -D line (Arch's don't)
 auditctl -d task,never >/dev/null 2>&1; auditctl -d never,task >/dev/null 2>&1
 check_not "rule gone" bash -c "auditctl -l | grep -qxE '$NEVER_RE'"
@@ -207,6 +234,9 @@ group "install"
 if run_install "${install_args[@]}"; then pass "install.sh succeeds"; else cat "$W/install.log"; die "install.sh failed"; fi
 tail -n 25 "$W/install.log"
 check "service is active" systemctl is-active --quiet "$SERVICE"
+check "unit installed in $UNITDIR" test -f "$UNIT"
+check "service starts at boot (multi-user.target wants it)" bash -c "systemctl show -p WantedBy --value '$SERVICE' | grep -qw multi-user.target"
+check "rules file is root-only (640)" test "$(stat -c '%a %U' "$RULES")" = "640 root"
 check "handler is root-only (700)" test "$(stat -c '%a %U' "$HANDLER")" = "700 root"
 check "config is root-only (600)" test "$(stat -c '%a %U' "$CONF")" = "600 root"
 check "handler has the config path baked in" grep -qF "\"$CONF\")" "$HANDLER"
@@ -233,12 +263,13 @@ endgroup
 
 # ------------------------------------------------------------- stealth
 group "stealth"
-check_not "unit file doesn't say honeypot" grep -qi honeypot "/etc/systemd/system/$SERVICE.service"
+check_not "unit file doesn't say honeypot" grep -qi honeypot "$UNIT"
 check_not "rules file doesn't say honeypot" grep -qi honeypot "$RULES"
 # (not the whole process list: this runner checks the repo out under .../honeypot/)
 check_not "handler's command line doesn't say honeypot" bash -c "ps -o args= -p \"\$(systemctl show -p MainPID --value '$SERVICE')\" | grep -qi honeypot"
 check_not "nft ruleset doesn't say honeypot" bash -c "nft list ruleset | grep -qi honeypot"
-check_not "no file installed under a honeypot name" bash -c "ls /etc/systemd/system /usr/local/sbin /usr/lib/polkit-1 /etc/polkit-1 /etc/audit/rules.d | grep -qi honeypot"
+check_not "no file installed under a honeypot name" bash -c "ls '$UNITDIR' /usr/local/sbin /usr/lib/polkit-1 /etc/polkit-1 /etc/audit/rules.d | grep -qi honeypot"
+check_not "the (world-readable) unit names no bait" grep -qF "$UHOME" "$UNIT"
 endgroup
 
 # ------------------------------------------------------------- no false alarm
@@ -295,9 +326,36 @@ auditctl -e 1 >/dev/null
 check "--health recovers" "$HANDLER" --health
 auditctl -D -k "$AKEY" >/dev/null
 check_not "--health fails when the rules are unloaded" "$HANDLER" --health
-augenrules --load >/dev/null 2>&1 || auditctl -R "$RULES" >/dev/null
-check "--health recovers after reload" "$HANDLER" --health
+if [[ $NIXOS == yes ]]; then
+  systemctl restart "$SERVICE"   # NixOS: the handler loads its rules file at start
+  check "--health recovers after a service restart (handler reloads the rules)" wait_health 20
+else
+  augenrules --load >/dev/null 2>&1 || auditctl -R "$RULES" >/dev/null
+  check "--health recovers after reload" "$HANDLER" --health
+fi
 endgroup
+
+# ------------------------------------------------------------- NixOS rule reloads
+# NixOS reloads its own audit rules at boot and on a nixos-rebuild that changes
+# them: audit-rules-nixos.service deletes EVERY rule when it stops (ours too).
+# nixos-rebuild stops and starts it; a plain restart is the other path.
+if [[ $NIXOS == yes ]]; then
+  group "NixOS: our rules come back when NixOS reloads its own"
+  check "$NIXOS_RULES_UNIT wants the service" bash -c "systemctl show -p WantedBy --value '$SERVICE' | grep -qw '$NIXOS_RULES_UNIT'"
+  systemctl restart "$NIXOS_RULES_UNIT"
+  check "restart: service active again" wait_active 20
+  check "restart: --health passes (rules reloaded)" wait_health 20
+  systemctl stop "$NIXOS_RULES_UNIT"
+  check_not "stop: every rule deleted, ours too (what NixOS does)" bash -c "auditctl -l | grep -q '$AKEY'"
+  check_not "stop: the service stopped with it (PartOf)" systemctl is-active --quiet "$SERVICE"
+  systemctl start "$NIXOS_RULES_UNIT"
+  check "start: service started again with it" wait_active 20
+  check "start: --health passes (rules reloaded)" wait_health 20
+  before=$(alert_count "title\": \"Honeypot triggered")
+  ssh_as -- 'cat ~/password.txt; sleep 30' >/dev/null 2>&1
+  check "a read after the reload still triggers" wait_alert "title\": \"Honeypot triggered" $((before + 1)) 20
+  endgroup
+fi
 
 # ------------------------------------------------------------- re-install
 group "re-install (idempotent)"
@@ -337,7 +395,8 @@ endgroup
 # ------------------------------------------------------------- uninstall
 group "uninstall --purge"
 check "uninstall.sh --purge succeeds" bash -c "cd '$REPO' && ./uninstall.sh --purge"
-check_not "unit removed" test -e "/etc/systemd/system/$SERVICE.service"
+check_not "unit removed" test -e "$UNIT"
+check_not "no .wants link left" bash -c "ls '$UNITDIR'/*.wants/'$SERVICE.service' 2>/dev/null | grep -q ."
 check_not "service gone" systemctl is-active --quiet "$SERVICE"
 check_not "handler removed" test -e "$HANDLER"
 check_not "rules file removed" test -e "$RULES"

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Run the integration test (tests/integration/run.sh) inside a VM of another
-# distribution: boots its official cloud image under QEMU/KVM, copies this repo
-# in and runs the test there as root. Used by .github/workflows/vm.yml.
+# distribution: boots its official cloud image under QEMU/KVM (or an image the
+# flavor builds itself, e.g. NixOS), copies this repo in and runs the test there
+# as root. Used by .github/workflows/vm.yml.
 #   tests/vm/run.sh <flavor>        flavors: tests/vm/flavors/<flavor>.sh
-# Needs qemu-system-x86_64, qemu-img, cloud-localds and (for speed) /dev/kvm.
+# Needs qemu-system-x86_64, qemu-img, cloud-localds and (for speed) /dev/kvm;
+# flavors that build their image (image_build) need what they say (nixos: Nix).
 # Everything happens in a throwaway VM; this machine is not changed.
 set -euo pipefail
 
@@ -16,6 +18,7 @@ mkdir -p "$W"
 [[ $FLAVOR =~ ^[a-z0-9][a-z0-9._-]*$ && -f $ROOT/tests/vm/flavors/$FLAVOR.sh ]] \
   || { echo "unknown flavor: $FLAVOR (have: $(cd "$ROOT/tests/vm/flavors" && ls -- *.sh | sed 's/\.sh$//' | tr '\n' ' '))" >&2; exit 2; }
 prepare() { :; }   # a flavor may override it
+image_url() { :; } # a flavor defines this, or image_build
 # shellcheck source=/dev/null
 . "$ROOT/tests/vm/flavors/$FLAVOR.sh"
 
@@ -50,11 +53,18 @@ trap stop_vm EXIT
 
 # ------------------------------------------------------------- image, seed
 group "image"
-url=$(image_url)
-echo "$FLAVOR: $url"
-[[ -s $W/base.qcow2 ]] || curl -fsSL --retry 3 -o "$W/base.qcow2" "$url"
-qemu-img create -q -f qcow2 -F qcow2 -b "$W/base.qcow2" "$W/disk.qcow2" 12G
 ssh-keygen -q -t ed25519 -N '' -f "$W/id" <<<y >/dev/null
+if declare -F image_build >/dev/null; then
+  # built with this run's ssh key baked in (no cloud-init), so never reused
+  echo "$FLAVOR: building the image"
+  rm -f "$W/base.qcow2"
+  image_build "$W/base.qcow2" "$W/id.pub"
+else
+  url=$(image_url)
+  echo "$FLAVOR: $url"
+  [[ -s $W/base.qcow2 ]] || curl -fsSL --retry 3 -o "$W/base.qcow2" "$url"
+fi
+qemu-img create -q -f qcow2 -F qcow2 -b "$W/base.qcow2" "$W/disk.qcow2" 12G
 cat >"$W/user-data" <<EOF
 #cloud-config
 users:
