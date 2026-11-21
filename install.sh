@@ -591,8 +591,8 @@ e2e_test() {
 # ------------------------------------------------------------- start, report
 start_service() {
   step "Starting service $SERVICE_NAME"
-  systemctl daemon-reload
   enable_unit
+  systemctl daemon-reload   # after enable_unit: the links made by hand (NixOS) only count from a reload
   systemctl restart "$SERVICE_NAME"
   sleep 1
   systemctl is-active "$SERVICE_NAME"

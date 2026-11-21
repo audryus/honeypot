@@ -446,6 +446,16 @@ type=PATH msg=x item=0 name="/h/b" inode=2'
   [ "$(readlink "$UNIT_DIR/audit-rules-nixos.service.wants/svc.service")" = ../svc.service ]
 }
 
+@test "start_service: reloads systemd after linking the unit (NixOS links count only from a reload)" {
+  nixos
+  fake systemctl "[[ \$1 != daemon-reload ]] || { [ -L '$UNIT_DIR/multi-user.target.wants/svc.service' ] && echo linked-before-reload >>'$T/calls'; }; true"
+  HANDLER_PATH=$T/h; printf '#!/bin/sh\nexit 0\n' >"$HANDLER_PATH"; chmod +x "$HANDLER_PATH"
+  sleep() { :; }
+  start_service >/dev/null
+  grep -qx linked-before-reload "$T/calls"
+  grep -qx "systemctl restart svc" "$T/calls"
+}
+
 @test "install_unit: creates the unit folder (NixOS control folder)" {
   nixos
   HANDLER_PATH=/var/lib/x/helper SERVICE_DESCRIPTION=d
