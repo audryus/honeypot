@@ -163,8 +163,9 @@ USHELL=/bin/bash; [[ -x $USHELL ]] || USHELL=$(command -v bash)   # NixOS has no
 id "$U" >/dev/null 2>&1 || useradd -m -s "$USHELL" "$U"
 echo "my real notes" >"$UHOME/notes.txt"; chown "$U:" "$UHOME/notes.txt"
 ssh-keygen -q -t ed25519 -N '' -f "$KEY"
-install -d -m 700 -o "$U" -g "$U" "$UHOME/.ssh"
-install -m 600 -o "$U" -g "$U" "$KEY.pub" "$UHOME/.ssh/authorized_keys"
+UGRP=$(id -gn "$U")   # NixOS: no per-user group, users go in "users"
+install -d -m 700 -o "$U" -g "$UGRP" "$UHOME/.ssh"
+install -m 600 -o "$U" -g "$UGRP" "$KEY.pub" "$UHOME/.ssh/authorized_keys"
 command -v restorecon >/dev/null && restorecon -R "$UHOME/.ssh"   # SELinux: ssh_home_t
 # A second, non-loopback local address to connect from, so the handler has a
 # source it may ban: a dummy interface, else this machine's own address (some
