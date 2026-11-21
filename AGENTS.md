@@ -87,9 +87,10 @@ them.
 ## Install, step by step
 
 1. Read the README's Requirements, Quick start and "How to install".
-2. Ask the owner the questions in rule 2.
-3. `cp honeypot.conf.example honeypot.conf` and set the answers (or let the
-   owner edit it: secrets).
+2. Ask the owner the questions in rule 2 (target user, decoys, containment
+   at first).
+3. `cp honeypot.conf.example honeypot.conf` and walk the owner through it
+   ([next section](#walking-the-owner-through-honeypotconf)).
 4. Run (or hand the owner) `./install.sh -u <user> -e <decoy> ...` as root.
 5. Read the whole output. Success ends with `Done. Watching N bait file(s)`,
    after `verified: every bait has its open and write rules loaded`, the
@@ -100,6 +101,39 @@ them.
 To see containment work, the owner should trigger it from **another machine**
 whose IP isn't in `BAN_SAFE_IPS` (README, "How to test it without locking
 yourself out"). Don't trigger it yourself.
+
+## Walking the owner through honeypot.conf
+
+`honeypot.conf` (a copy of [honeypot.conf.example](honeypot.conf.example),
+git-ignored) holds every setting. Each key there has a comment explaining it;
+go through the file **section by section, in its order**, with the owner:
+say what each key does in a sentence, propose a value that fits this machine,
+and write it only once they agree. Don't skip a section because its default
+looks fine: the owner should know what they're installing.
+
+| Section | Keys | How to guide |
+|---|---|---|
+| STEALTH | `SERVICE_NAME`, `SERVICE_DESCRIPTION`, `HANDLER_PATH`, `CONF_PATH`, `REPORT_DIR`, `RULES_NAME`, `AUDIT_KEY`, `NFT_TABLE` | Start with the ones marked `[everyone]` in the file. Look at what's really installed (`systemctl list-units --type=service`, `ls /usr/lib /usr/libexec /etc`) and propose 2 or 3 consistent "vendor" sets that fit, never the file's defaults or the README's examples. Respect each key's allowed characters (the installer checks them and refuses names that already exist). |
+| BAIT | `BAIT_FILE`, `BAIT_CREATED` | Leave empty: the installer writes them. Decoys are picked with `-e` / `-f` (rule 2, [examples/README.md](examples/README.md)). |
+| NOTIFICATION LOOK | `HOST_LABEL` | The name alerts use for this machine; empty = hostname. Useful with several machines. |
+| CONTAINMENT | `KILL_SESSION`, `BAN_IP`, `BAN_TIMEOUT`, `BAN_SAFE_IPS` | Explain that `KILL_SESSION=no` alone is not monitor-only (the ban still drops SSH): both `no` for a trial. Get `BAN_SAFE_IPS` right (rule 2): it's what keeps the owner from being locked out. |
+| NOISE CONTROL | `IGNORE_AUIDS`, `DEBOUNCE_SECONDS` | Recommend `IGNORE_AUIDS` empty (ignoring a uid also ignores whoever steals that account; never `4294967295`). Ask which backup or indexing tools run here: they get the bait paths excluded in their own config, not here. |
+| ENRICHMENT | `IP_LOOKUP` | `yes` sends public attacker IPs (never LAN ones) to ipinfo.io. Let the owner choose. |
+| LIVENESS | `HEARTBEAT_DAYS`, `HEARTBEAT_URL` | Explain the "still watching" message and suggest keeping it on. Offer a dead-man's switch (healthchecks.io, Uptime Kuma push), and mention the trade-off in the README's stealth section: an outgoing HTTPS connection every 15 minutes. |
+| AUDIT LOG | `AUDIT_LOG` | Check auditd's real log path (`sudo grep -E '^log_file' /etc/audit/auditd.conf`) and change it only if it differs. |
+| NOTIFICATIONS | `NTFY_URL`/`NTFY_TOKEN`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, `DISCORD_WEBHOOK`, `WEBHOOK_URL` | At least one is needed. Ask which app the owner uses and give them that channel's setup steps from the file's comments (ntfy: a long random topic from `openssl rand -hex 16`; Telegram: @BotFather, then the chat id). Tell them the exact lines to fill in and let them paste the secrets themselves (`nano honeypot.conf`), so tokens stay out of your session. Don't print the file back with secrets in it. |
+
+Before installing, show the owner a summary of the chosen values (secrets
+shown only as "set" / "empty") and get a yes.
+
+Afterwards there are two copies, and the owner should know which is which:
+
+- **Installed copy at `CONF_PATH`** (root only): runtime settings are changed
+  there and apply on the next event, no restart (`AUDIT_LOG` needs a
+  `systemctl restart <SERVICE_NAME>`).
+- **`honeypot.conf` next to the scripts**: the STEALTH names only take effect
+  through `install.sh`, and `uninstall.sh` needs them. The owner keeps this copy
+  off the machine, with the repository.
 
 ## What to report to the owner
 
